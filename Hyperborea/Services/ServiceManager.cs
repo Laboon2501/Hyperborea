@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 namespace Hyperborea.Services;
 public static class S
 {
-    public static ThreadPool ThreadPool { get; private set; }
-    public static OpcodeUpdater OpcodeUpdater { get; private set; }
+    public static ThreadPool ThreadPool { get; private set; } = null!;
+    public static OpcodeUpdater OpcodeUpdater { get; private set; } = null!;
+    public static TerritoryDiscoveryService TerritoryDiscovery { get; private set; } = null!;
 }
