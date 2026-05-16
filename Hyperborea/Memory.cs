@@ -12,6 +12,7 @@ using InteropGenerator.Runtime;
 using Lumina.Excel.Sheets;
 using System.CodeDom;
 using System.Net.NetworkInformation;
+using FFXIVControl = FFXIVClientStructs.FFXIV.Client.Game.Control.Control;
 using TerraFX.Interop.Windows;
 using static FFXIVClientStructs.FFXIV.Client.Network.PacketDispatcher.Delegates;
 
@@ -46,7 +47,7 @@ public unsafe class Memory
     [EzHook("48 89 5C 24 ?? 48 89 6C 24 ?? 48 89 74 24 ?? 57 48 83 EC 70 48 8D B1", false)]
     internal EzHook<FinalizeInstanceContent> FinalizeInstanceContentHook;
 
-    internal delegate nint IsFlightProhibited();
+    internal delegate FFXIVControl.FlightAllowedStatus IsFlightProhibited();
     [EzHook("40 53 48 83 EC 20 48 8B 1D ?? ?? ?? ?? 48 85 DB 0F 84 ?? ?? ?? ?? 80 3D", false)]
     internal EzHook<IsFlightProhibited> IsFlightProhibitedHook;
 
@@ -80,11 +81,11 @@ public unsafe class Memory
         }
     }
 
-    internal nint IsFlightProhibitedDetour()
+    internal FFXIVControl.FlightAllowedStatus IsFlightProhibitedDetour()
     {
         try
         {
-            if (P.Enabled && C.ForcedFlight) return 0;
+            if (P.Enabled && C.ForcedFlight) return FFXIVControl.FlightAllowedStatus.CanFly;
         }
         catch(Exception e)
         {

@@ -751,8 +751,21 @@ public sealed class TerritoryDiscoveryService
 
         try
         {
-            var method = typeof(TerritoryDiscoveryService).GetMethod(nameof(ScanTypedSheetByReflection), System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-            method?.MakeGenericMethod(type).Invoke(this, [entries, territoryEntries, sceneEntries, stats, sheetName]);
+            if (ImplementsExcelInterface(type, typeof(IExcelRow<>)))
+            {
+                var method = typeof(TerritoryDiscoveryService).GetMethod(nameof(ScanTypedSheetByReflection), System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                method?.MakeGenericMethod(type).Invoke(this, [entries, territoryEntries, sceneEntries, stats, sheetName]);
+                return;
+            }
+
+            if (ImplementsExcelInterface(type, typeof(IExcelSubrow<>)))
+            {
+                var method = typeof(TerritoryDiscoveryService).GetMethod(nameof(ScanTypedSubrowSheetByReflection), System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                method?.MakeGenericMethod(type).Invoke(this, [entries, territoryEntries, sceneEntries, stats, sheetName]);
+                return;
+            }
+
+            stats.SkipSheet(sheetName, "generated type is not an Excel row or subrow");
         }
         catch (Exception e)
         {
@@ -761,6 +774,13 @@ public sealed class TerritoryDiscoveryService
         }
     }
 
+    static bool ImplementsExcelInterface(Type type, Type openInterface)
+        => type.IsValueType
+            && type.GetInterfaces().Any(interfaceType =>
+                interfaceType.IsGenericType
+                && interfaceType.GetGenericTypeDefinition() == openInterface
+                && interfaceType.GetGenericArguments().FirstOrDefault() == type);
+
     void ScanTypedSheetByReflection<T>(Dictionary<string, TerritoryBrowserEntry> entries, Dictionary<uint, TerritoryBrowserEntry> territoryEntries, Dictionary<string, TerritoryBrowserEntry> sceneEntries, TerritoryDiscoveryStats stats, string sheetName)
         where T : struct, IExcelRow<T>
     {
@@ -768,6 +788,17 @@ public sealed class TerritoryDiscoveryService
         {
             var rowId = GetRowId(row);
             var source = new TerritorySourceInfo(sheetName, rowId, $"{sheetName} {rowId}", "reflection", sheetName.Contains("Event", StringComparison.OrdinalIgnoreCase) ? "[EventScene]" : $"[{sheetName}]");
+            ScanValueForReferences(row!, source, entries, territoryEntries, sceneEntries, stats, 0);
+        }
+    }
+
+    void ScanTypedSubrowSheetByReflection<T>(Dictionary<string, TerritoryBrowserEntry> entries, Dictionary<uint, TerritoryBrowserEntry> territoryEntries, Dictionary<string, TerritoryBrowserEntry> sceneEntries, TerritoryDiscoveryStats stats, string sheetName)
+        where T : struct, IExcelSubrow<T>
+    {
+        foreach (var row in EnumerateSubrowSheet<T>(sheetName, stats))
+        {
+            var rowId = GetRowId(row);
+            var source = new TerritorySourceInfo(sheetName, rowId, $"{sheetName} {rowId}", "reflection subrow", sheetName.Contains("Event", StringComparison.OrdinalIgnoreCase) ? "[EventScene]" : $"[{sheetName}]");
             ScanValueForReferences(row!, source, entries, territoryEntries, sceneEntries, stats, 0);
         }
     }

@@ -82,7 +82,7 @@ public unsafe class Hyperborea : IDalamudPlugin
             Utils.LoadBuiltInZoneData();
             new EzFrameworkUpdate(Tick);
             Overlay = new();
-            FestivalDatas = EzConfig.DefaultSerializationFactory.Deserialize<List<FestivalData>>(File.ReadAllText(Path.Combine(Svc.PluginInterface.AssemblyLocation.DirectoryName, "festivals.yaml")));
+            FestivalDatas = LoadFestivalData();
             foreach(var x in Svc.Data.GetExcelSheet<Festival>())
             {
                 if(x.RowId != 0 && !FestivalDatas.Any(d => d.Id == x.RowId))
@@ -97,6 +97,33 @@ public unsafe class Hyperborea : IDalamudPlugin
             SingletonServiceManager.Initialize(typeof(S));
             MapEffectDumper = new();
         });
+    }
+
+    List<FestivalData> LoadFestivalData()
+    {
+        var assemblyDirectory = Svc.PluginInterface.AssemblyLocation.DirectoryName ?? "";
+        var candidates = new[]
+        {
+            Path.Combine(assemblyDirectory, "festivals.yaml"),
+            Path.Combine(AppContext.BaseDirectory, "festivals.yaml"),
+            Path.GetFullPath(Path.Combine(assemblyDirectory, "..", "..", "festivals.yaml")),
+        }.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+
+        foreach (var path in candidates)
+        {
+            try
+            {
+                if (!File.Exists(path)) continue;
+                return EzConfig.DefaultSerializationFactory.Deserialize<List<FestivalData>>(File.ReadAllText(path)) ?? [];
+            }
+            catch (Exception e)
+            {
+                PluginLog.Warning($"Failed to load festivals.yaml from {path}. {e.GetType().Name}: {e.Message}");
+            }
+        }
+
+        PluginLog.Warning($"festivals.yaml was not found. Checked: {string.Join(", ", candidates)}. Continuing with empty festival data.");
+        return [];
     }
 
     bool IsLButtonPressed = false;
