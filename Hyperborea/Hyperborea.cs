@@ -68,7 +68,6 @@ public unsafe class Hyperborea : IDalamudPlugin
             EzConfigGui.Window.Flags = ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoScrollbar;
             EzCmd.Add("/hyper", OnCommand);
             Memory = new();
-            _ = S.DirectBgPathEntry;
             SettingsWindow = new();
             LogWindow = new();
             DebugWindow = new();
@@ -83,7 +82,7 @@ public unsafe class Hyperborea : IDalamudPlugin
             Utils.LoadBuiltInZoneData();
             new EzFrameworkUpdate(Tick);
             Overlay = new();
-            FestivalDatas = LoadFestivalData();
+            FestivalDatas = EzConfig.DefaultSerializationFactory.Deserialize<List<FestivalData>>(File.ReadAllText(Path.Combine(Svc.PluginInterface.AssemblyLocation.DirectoryName, "festivals.yaml")));
             foreach(var x in Svc.Data.GetExcelSheet<Festival>())
             {
                 if(x.RowId != 0 && !FestivalDatas.Any(d => d.Id == x.RowId))
@@ -100,37 +99,9 @@ public unsafe class Hyperborea : IDalamudPlugin
         });
     }
 
-    List<FestivalData> LoadFestivalData()
-    {
-        var assemblyDirectory = Svc.PluginInterface.AssemblyLocation.DirectoryName ?? "";
-        var candidates = new[]
-        {
-            Path.Combine(assemblyDirectory, "festivals.yaml"),
-            Path.Combine(AppContext.BaseDirectory, "festivals.yaml"),
-            Path.GetFullPath(Path.Combine(assemblyDirectory, "..", "..", "festivals.yaml")),
-        }.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-
-        foreach (var path in candidates)
-        {
-            try
-            {
-                if (!File.Exists(path)) continue;
-                return EzConfig.DefaultSerializationFactory.Deserialize<List<FestivalData>>(File.ReadAllText(path)) ?? [];
-            }
-            catch (Exception e)
-            {
-                PluginLog.Warning($"Failed to load festivals.yaml from {path}. {e.GetType().Name}: {e.Message}");
-            }
-        }
-
-        PluginLog.Warning($"festivals.yaml was not found. Checked: {string.Join(", ", candidates)}. Continuing with empty festival data.");
-        return [];
-    }
-
     bool IsLButtonPressed = false;
     private void Tick()
     {
-        S.DirectBgPathEntry.Update();
         if(Enabled)
         {
             if (C.FastTeleport)
@@ -203,7 +174,6 @@ public unsafe class Hyperborea : IDalamudPlugin
 
     private void OnTerritoryChanged(uint obj)
     {
-        S.DirectBgPathEntry.OnTerritoryChanged(obj);
         /*if (P.Enabled) return;
         TaskManager.Abort();
         TaskManager.Enqueue(() =>
@@ -238,7 +208,6 @@ public unsafe class Hyperborea : IDalamudPlugin
 
     private void OnLogout()
     {
-        S.DirectBgPathEntry.Clear("logout");
         if(P.Enabled)
         {
             PluginLog.Warning($"Disconnect detected, opcode redownload scheduled.");
@@ -293,7 +262,6 @@ public unsafe class Hyperborea : IDalamudPlugin
 
     public void Dispose()
     {
-        S.DirectBgPathEntry.Clear("plugin dispose");
         if(Svc.ClientState.IsLoggedIn && Enabled)
         {
             Utils.Revert();

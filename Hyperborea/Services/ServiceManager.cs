@@ -9,24 +9,6 @@ using System.Threading.Tasks;
 namespace Hyperborea.Services;
 public static class S
 {
-    public static ThreadPool ThreadPool { get; private set; } = null!;
-    public static OpcodeUpdater OpcodeUpdater { get; private set; } = null!;
-    static TerritoryDiscoveryService? territoryDiscovery;
-    public static TerritoryDiscoveryService TerritoryDiscovery
-    {
-        get => territoryDiscovery ??= new();
-        private set => territoryDiscovery = value;
-    }
-    static BgPathResolver? bgPathResolver;
-    public static BgPathResolver BgPathResolver
-    {
-        get => bgPathResolver ??= new();
-        private set => bgPathResolver = value;
-    }
-    static DirectBgPathEntryService? directBgPathEntry;
-    public static DirectBgPathEntryService DirectBgPathEntry
-    {
-        get => directBgPathEntry ??= new();
-        private set => directBgPathEntry = value;
-    }
+    public static ThreadPool ThreadPool { get; private set; }
+    public static OpcodeUpdater OpcodeUpdater { get; private set; }
 }

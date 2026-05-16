@@ -78,13 +78,11 @@
 	</ItemGroup>
 
 	<ItemGroup>
-		<Content Include="data.yaml">
+		<None Update="data.yaml">
 			<CopyToOutputDirectory>Always</CopyToOutputDirectory>
-			<CopyToPublishDirectory>Always</CopyToPublishDirectory>
-		</Content>
-		<Content Include="festivals.yaml">
+		</None>
+		<None Update="festivals.yaml">
 			<CopyToOutputDirectory>Always</CopyToOutputDirectory>
-			<CopyToPublishDirectory>Always</CopyToPublishDirectory>
-		</Content>
+		</None>
 	</ItemGroup>
 </Project>
