@@ -17,4 +17,10 @@ public static class S
         get => territoryDiscovery ??= new();
         private set => territoryDiscovery = value;
     }
+    static BgPathResolver? bgPathResolver;
+    public static BgPathResolver BgPathResolver
+    {
+        get => bgPathResolver ??= new();
+        private set => bgPathResolver = value;
+    }
 }

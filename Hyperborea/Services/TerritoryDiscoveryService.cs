@@ -98,6 +98,7 @@ public sealed class TerritoryDiscoveryService
             cachedEntries = [];
             cachedTerritoryEntries = [];
             cachedKeyEntries = [];
+            S.BgPathResolver.Invalidate();
             Status = "Cache invalidated";
         }
     }
@@ -124,7 +125,7 @@ public sealed class TerritoryDiscoveryService
             LoadGatheringPointTerritories(entries, territoryEntries, stats);
             LoadQuestEventAreaTerritories(entries, territoryEntries, stats);
             LoadReflectiveEventTerritories(entries, territoryEntries, sceneEntries, stats);
-            LoadCutsceneSceneOnly(entries, sceneEntries, stats);
+            LoadCutsceneSceneOnly(entries, territoryEntries, sceneEntries, stats);
         }
 
         foreach (var entry in entries.Values)
@@ -226,7 +227,7 @@ public sealed class TerritoryDiscoveryService
                     Tag = "[Cutscene]",
                     CutsceneId = cutsceneId,
                 };
-                AddCutsceneSource(entries, sceneEntries, cutsceneId, sceneSource, stats);
+                AddCutsceneSource(entries, territoryEntries, sceneEntries, cutsceneId, sceneSource, stats);
             }
 
             stats.AddCandidate("Quest");
@@ -249,8 +250,8 @@ public sealed class TerritoryDiscoveryService
             var entry = AddContentFinderCondition(entries, territoryEntries, content.ContentFinderCondition.RowId, new("PublicContent", content.RowId, sourceName, "ContentFinderCondition", "[Instance]"), stats);
             AddPublicContentCutsceneToTerritory(entry, content.StartCutscene.RowId, new("PublicContent", content.RowId, sourceName, "StartCutscene", "[Cutscene]"));
             AddPublicContentCutsceneToTerritory(entry, content.EndCutscene.RowId, new("PublicContent", content.RowId, sourceName, "EndCutscene", "[Cutscene]"));
-            AddPublicContentCutscene(entries, sceneEntries, content.StartCutscene.RowId, new("PublicContent", content.RowId, sourceName, "StartCutscene", "[Cutscene]"), stats);
-            AddPublicContentCutscene(entries, sceneEntries, content.EndCutscene.RowId, new("PublicContent", content.RowId, sourceName, "EndCutscene", "[Cutscene]"), stats);
+            AddPublicContentCutscene(entries, territoryEntries, sceneEntries, content.StartCutscene.RowId, new("PublicContent", content.RowId, sourceName, "StartCutscene", "[Cutscene]"), stats);
+            AddPublicContentCutscene(entries, territoryEntries, sceneEntries, content.EndCutscene.RowId, new("PublicContent", content.RowId, sourceName, "EndCutscene", "[Cutscene]"), stats);
             stats.AddCandidate("PublicContent");
         }
     }
@@ -265,8 +266,8 @@ public sealed class TerritoryDiscoveryService
             AddLevelSource(entries, territoryEntries, warp.PopRange.RowId, source with { Field = "PopRange" }, stats);
             AddCutsceneToTerritory(entry, warp.StartCutscene.RowId, source with { Field = "StartCutscene", Tag = "[Cutscene]", CutsceneId = warp.StartCutscene.RowId });
             AddCutsceneToTerritory(entry, warp.EndCutscene.RowId, source with { Field = "EndCutscene", Tag = "[Cutscene]", CutsceneId = warp.EndCutscene.RowId });
-            AddCutsceneSource(entries, sceneEntries, warp.StartCutscene.RowId, source with { Field = "StartCutscene", Tag = "[Cutscene]", CutsceneId = warp.StartCutscene.RowId }, stats);
-            AddCutsceneSource(entries, sceneEntries, warp.EndCutscene.RowId, source with { Field = "EndCutscene", Tag = "[Cutscene]", CutsceneId = warp.EndCutscene.RowId }, stats);
+            AddCutsceneSource(entries, territoryEntries, sceneEntries, warp.StartCutscene.RowId, source with { Field = "StartCutscene", Tag = "[Cutscene]", CutsceneId = warp.StartCutscene.RowId }, stats);
+            AddCutsceneSource(entries, territoryEntries, sceneEntries, warp.EndCutscene.RowId, source with { Field = "EndCutscene", Tag = "[Cutscene]", CutsceneId = warp.EndCutscene.RowId }, stats);
             stats.AddCandidate("Warp");
         }
     }
@@ -339,11 +340,11 @@ public sealed class TerritoryDiscoveryService
         }
     }
 
-    void LoadCutsceneSceneOnly(Dictionary<string, TerritoryBrowserEntry> entries, Dictionary<string, TerritoryBrowserEntry> sceneEntries, TerritoryDiscoveryStats stats)
+    void LoadCutsceneSceneOnly(Dictionary<string, TerritoryBrowserEntry> entries, Dictionary<uint, TerritoryBrowserEntry> territoryEntries, Dictionary<string, TerritoryBrowserEntry> sceneEntries, TerritoryDiscoveryStats stats)
     {
         foreach (var cutscene in EnumerateSheet<Cutscene>("Cutscene", stats))
         {
-            AddCutsceneSource(entries, sceneEntries, cutscene.RowId, new("Cutscene", cutscene.RowId, SafeText(() => cutscene.Path.GetText() ?? "", "Cutscene.Path"), "Path", "[Cutscene]") { CutsceneId = cutscene.RowId }, stats);
+            AddCutsceneSource(entries, territoryEntries, sceneEntries, cutscene.RowId, new("Cutscene", cutscene.RowId, SafeText(() => cutscene.Path.GetText() ?? "", "Cutscene.Path"), "Path", "[Cutscene]") { CutsceneId = cutscene.RowId }, stats);
         }
     }
 
@@ -380,7 +381,7 @@ public sealed class TerritoryDiscoveryService
             entry.AddTag("[Cutscene]");
             entry.AddSource(source with { Field = "Cutscene", Tag = "[Cutscene]", CutsceneId = cutsceneId, InstanceContentId = instanceId });
         }
-        AddCutsceneSource(entries, sceneEntries, cutsceneId, source with { Tag = "[Cutscene]", CutsceneId = cutsceneId }, stats);
+        AddCutsceneSource(entries, territoryEntries, sceneEntries, cutsceneId, source with { Tag = "[Cutscene]", CutsceneId = cutsceneId }, stats);
         stats.AddCandidate("InstanceContent");
     }
 
@@ -392,13 +393,13 @@ public sealed class TerritoryDiscoveryService
         return AddTerritorySource(entries, territoryEntries, cfc.Value.TerritoryType.RowId, source with { ContentFinderConditionId = cfcId }, stats);
     }
 
-    void AddPublicContentCutscene(Dictionary<string, TerritoryBrowserEntry> entries, Dictionary<string, TerritoryBrowserEntry> sceneEntries, uint publicCutsceneId, TerritorySourceInfo source, TerritoryDiscoveryStats stats)
+    void AddPublicContentCutscene(Dictionary<string, TerritoryBrowserEntry> entries, Dictionary<uint, TerritoryBrowserEntry> territoryEntries, Dictionary<string, TerritoryBrowserEntry> sceneEntries, uint publicCutsceneId, TerritorySourceInfo source, TerritoryDiscoveryStats stats)
     {
         if (publicCutsceneId == 0) return;
         var row = GetSheetRow<PublicContentCutscene>(publicCutsceneId);
         if (row == null) return;
-        AddCutsceneSource(entries, sceneEntries, row.Value.Cutscene.RowId, source with { CutsceneId = row.Value.Cutscene.RowId }, stats);
-        AddCutsceneSource(entries, sceneEntries, row.Value.Cutscene2.RowId, source with { Field = source.Field + "2", CutsceneId = row.Value.Cutscene2.RowId }, stats);
+        AddCutsceneSource(entries, territoryEntries, sceneEntries, row.Value.Cutscene.RowId, source with { CutsceneId = row.Value.Cutscene.RowId }, stats);
+        AddCutsceneSource(entries, territoryEntries, sceneEntries, row.Value.Cutscene2.RowId, source with { Field = source.Field + "2", CutsceneId = row.Value.Cutscene2.RowId }, stats);
     }
 
     void AddPublicContentCutsceneToTerritory(TerritoryBrowserEntry? entry, uint publicCutsceneId, TerritorySourceInfo source)
@@ -417,14 +418,49 @@ public sealed class TerritoryDiscoveryService
         entry.AddSource(source with { Tag = "[Cutscene]", CutsceneId = cutsceneId });
     }
 
-    void AddCutsceneSource(Dictionary<string, TerritoryBrowserEntry> entries, Dictionary<string, TerritoryBrowserEntry> sceneEntries, uint cutsceneId, TerritorySourceInfo source, TerritoryDiscoveryStats stats)
+    void AddCutsceneSource(Dictionary<string, TerritoryBrowserEntry> entries, Dictionary<uint, TerritoryBrowserEntry> territoryEntries, Dictionary<string, TerritoryBrowserEntry> sceneEntries, uint cutsceneId, TerritorySourceInfo source, TerritoryDiscoveryStats stats)
     {
         if (cutsceneId == 0) return;
         var key = $"cutscene:{cutsceneId}";
+        var cutscene = GetSheetRow<Cutscene>(cutsceneId);
+        var path = cutscene == null ? "" : SafeText(() => cutscene.Value.Path.GetText() ?? "", "Cutscene.Path");
+        IReadOnlyList<BgPathMatch> matches = path.IsNullOrEmpty() ? [] : S.BgPathResolver.ResolveTerritoriesByBgPath(path);
+        stats.RecordBgPathResolution(path, matches);
+        LogSpecificBgPathDiagnostic(path, matches, stats);
+        if (matches.Count > 0)
+        {
+            if (sceneEntries.Remove(key))
+            {
+                entries.Remove(key);
+            }
+
+            foreach (var match in matches)
+            {
+                var resolvedEntry = AddTerritorySource(entries, territoryEntries, match.TerritoryId, source with
+                {
+                    Field = $"{source.Field}/BgResolved:{match.MatchKind}",
+                    Tag = "[Cutscene]",
+                    CutsceneId = cutsceneId,
+                }, stats);
+                if (resolvedEntry == null) continue;
+                resolvedEntry.AddTag("[BgResolved]");
+                resolvedEntry.AddTag("[CutsceneResolved]");
+                resolvedEntry.AddTag("[Cutscene]");
+                resolvedEntry.Bg = resolvedEntry.Bg.NullWhenEmpty() ?? match.TerritoryBgPath;
+                resolvedEntry.SearchParts.Add(path);
+                resolvedEntry.SearchParts.Add(BgPathResolver.NormalizePath(path));
+                foreach (var candidate in matches)
+                {
+                    resolvedEntry.AddBgPathMatch(candidate);
+                }
+            }
+
+            stats.AddCandidate("Cutscene.BgResolved");
+            return;
+        }
+
         if (!sceneEntries.TryGetValue(key, out var entry))
         {
-            var cutscene = GetSheetRow<Cutscene>(cutsceneId);
-            var path = cutscene == null ? "" : SafeText(() => cutscene.Value.Path.GetText() ?? "", "Cutscene.Path");
             entry = new TerritoryBrowserEntry
             {
                 Key = key,
@@ -435,12 +471,26 @@ public sealed class TerritoryDiscoveryService
                 RequiresConfirmation = true,
                 IsPotentiallyUnsafe = true,
             };
+            if (!path.IsNullOrEmpty())
+            {
+                entry.SearchParts.Add(path);
+                entry.SearchParts.Add(BgPathResolver.NormalizePath(path));
+                entry.SearchParts.Add(BgPathResolver.GetLastSegments(BgPathResolver.NormalizePath(path), 2));
+            }
             sceneEntries[key] = entry;
             entries[key] = entry;
         }
 
         entry.AddSource(source with { Sheet = source.Sheet.IsNullOrEmpty() ? "Cutscene" : source.Sheet, CutsceneId = cutsceneId });
         stats.AddCandidate("Cutscene");
+    }
+
+    void LogSpecificBgPathDiagnostic(string path, IReadOnlyList<BgPathMatch> matches, TerritoryDiscoveryStats stats)
+    {
+        const string interestingPath = "ex3/luckyw/luckyw00210/luckyw00210";
+        if (!BgPathResolver.NormalizePath(path).Equals(interestingPath, StringComparison.OrdinalIgnoreCase)) return;
+        stats.SpecificBgPathDiagnostic = S.BgPathResolver.CreateDiagnostic(path, matches);
+        LogInfoOnce("BgPath:luckyw00210", $"[TerritoryDiscovery] Bg path probe: {stats.SpecificBgPathDiagnostic}");
     }
 
     TerritoryBrowserEntry? AddTerritorySource(Dictionary<string, TerritoryBrowserEntry> entries, Dictionary<uint, TerritoryBrowserEntry> territoryEntries, uint territoryId, TerritorySourceInfo source, TerritoryDiscoveryStats stats)
@@ -629,7 +679,7 @@ public sealed class TerritoryDiscoveryService
                     AddInstanceContent(entries, territoryEntries, sceneEntries, rowId, source with { Tag = "[Instance]" }, stats);
                     break;
                 case "Cutscene":
-                    AddCutsceneSource(entries, sceneEntries, rowId, source with { Tag = "[Cutscene]", CutsceneId = rowId }, stats);
+                    AddCutsceneSource(entries, territoryEntries, sceneEntries, rowId, source with { Tag = "[Cutscene]", CutsceneId = rowId }, stats);
                     break;
             }
             return;
@@ -962,6 +1012,12 @@ public sealed class TerritoryDiscoveryService
         if (!loggedWarnings.Add(warningKey)) return;
         PluginLog.Warning($"[TerritoryDiscovery] {message} {e.GetType().Name}: {e.Message}");
     }
+
+    void LogInfoOnce(string key, string message)
+    {
+        if (!loggedWarnings.Add(key)) return;
+        PluginLog.Information(message);
+    }
 }
 
 public enum TerritoryBrowserFilter
@@ -991,6 +1047,7 @@ public sealed class TerritoryBrowserEntry
     public List<string> Tags = [];
     public List<string> SearchParts = [];
     public List<TerritorySourceInfo> Sources = [];
+    public List<BgPathMatch> BgPathMatches = [];
     public bool WasVisibleInOldSelector;
     public bool IsPotentiallyUnsafe;
     public bool RequiresConfirmation;
@@ -1010,6 +1067,13 @@ public sealed class TerritoryBrowserEntry
         SearchParts.AddRange(source.SearchParts);
     }
 
+    public void AddBgPathMatch(BgPathMatch match)
+    {
+        if (BgPathMatches.Any(x => x.TerritoryId == match.TerritoryId && x.SourcePath == match.SourcePath && x.TerritoryBgPath == match.TerritoryBgPath)) return;
+        BgPathMatches.Add(match);
+        SearchParts.AddRange(match.SearchParts);
+    }
+
     public void BuildSearchText()
     {
         SearchText = string.Join("\n",
@@ -1024,6 +1088,7 @@ public sealed class TerritoryBrowserEntry
                 .Append(IntendedUse)
                 .Concat(Tags)
                 .Concat(Sources.SelectMany(x => x.SearchParts))
+                .Concat(BgPathMatches.SelectMany(x => x.SearchParts))
                 .Where(x => !x.IsNullOrEmpty())
                 .Distinct());
     }
@@ -1048,20 +1113,27 @@ public record TerritorySourceInfo(string Sheet, uint RowId, string Name, string 
         {
             yield return Sheet;
             yield return RowId.ToString();
+            yield return $"{Sheet}#{RowId}";
             yield return Name;
             yield return Field;
             yield return Tag;
-            if (QuestId is { } questId) yield return questId.ToString();
+            if (QuestId is { } questId)
+            {
+                yield return questId.ToString();
+                yield return $"Quest#{questId}";
+            }
             if (!QuestName.IsNullOrEmpty()) yield return QuestName;
             if (CutsceneId is { } cutsceneId)
             {
                 yield return cutsceneId.ToString();
                 yield return $"Cutscene {cutsceneId}";
+                yield return $"Cutscene#{cutsceneId}";
             }
             if (EventSceneId is { } eventSceneId)
             {
                 yield return eventSceneId.ToString();
                 yield return $"EventScene {eventSceneId}";
+                yield return $"EventScene#{eventSceneId}";
             }
             if (MapId is { } mapId) yield return mapId.ToString();
             if (LevelId is { } levelId) yield return levelId.ToString();
@@ -1080,6 +1152,7 @@ public sealed class TerritoryDiscoveryStats
     public Dictionary<string, int> SheetsScanned = [];
     public Dictionary<string, int> CandidatesBySheet = [];
     public Dictionary<string, string> SkippedSheets = [];
+    readonly HashSet<string> uniqueBgPaths = [];
     public int TotalEntries;
     public int NormalEntries;
     public int QuestEntries;
@@ -1090,10 +1163,44 @@ public sealed class TerritoryDiscoveryStats
     public int NoMapEntries;
     public int NoPlaceNameEntries;
     public int NoTerritoryEntries;
+    public int UniqueBgPaths;
+    public int BgResolvedPaths;
+    public int BgUnresolvedPaths;
+    public int BgExactMatches;
+    public int BgNormalizedMatches;
+    public int BgFuzzyMatches;
+    public int BgMultiCandidateMatches;
+    public string SpecificBgPathDiagnostic = "";
 
     public void ScanSheet(string sheetName) => SheetsScanned[sheetName] = SheetsScanned.GetValueOrDefault(sheetName) + 1;
     public void AddCandidate(string sheetName) => CandidatesBySheet[sheetName] = CandidatesBySheet.GetValueOrDefault(sheetName) + 1;
     public void SkipSheet(string sheetName, string reason) => SkippedSheets.TryAdd(sheetName, reason);
+    public void RecordBgPathResolution(string bgPath, IReadOnlyList<BgPathMatch> matches)
+    {
+        var normalized = BgPathResolver.NormalizePath(bgPath);
+        if (normalized.IsNullOrEmpty() || !uniqueBgPaths.Add(normalized)) return;
+        UniqueBgPaths = uniqueBgPaths.Count;
+        if (matches.Count == 0)
+        {
+            BgUnresolvedPaths++;
+            return;
+        }
+
+        BgResolvedPaths++;
+        if (matches.Count > 1) BgMultiCandidateMatches++;
+        switch (matches.OrderByDescending(x => x.Score).First().MatchKind)
+        {
+            case BgPathMatchKind.Exact:
+                BgExactMatches++;
+                break;
+            case BgPathMatchKind.Normalized:
+                BgNormalizedMatches++;
+                break;
+            default:
+                BgFuzzyMatches++;
+                break;
+        }
+    }
 
     public TerritoryDiscoveryStats WithEntryCounts(IReadOnlyList<TerritoryBrowserEntry> entries)
     {

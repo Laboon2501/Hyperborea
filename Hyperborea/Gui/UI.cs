@@ -509,6 +509,15 @@ public unsafe static class UI
             ImGuiEx.TextWrapped(EColor.RedBright, "该条目缺少 TerritoryType，只能作为 cutscene/scene 线索搜索，不能直接进入。");
         }
 
+        if (entry.BgPathMatches.Count > 0)
+        {
+            ImGuiEx.Text($"Also matched territory candidates: {entry.BgPathMatches.Count}");
+            foreach (var match in entry.BgPathMatches.Take(12))
+            {
+                ImGuiEx.TextWrapped($"Territory {match.TerritoryId}  {match.MatchKind}  score {match.Score}  {match.TerritoryBgPath}");
+            }
+        }
+
         ImGui.Separator();
         ImGuiEx.Text($"Sources: {entry.SourceCount}");
         var shownSources = entry.Sources.Take(20).ToArray();
