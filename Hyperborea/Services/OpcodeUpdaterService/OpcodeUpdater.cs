@@ -12,6 +12,11 @@ public unsafe class OpcodeUpdater : IDisposable
 {
     volatile bool Disposed = false;
     public static string CurrentVersion => $"{CSFramework.Instance()->GameVersionString}_{P.GetType().Assembly.GetName().Version}";
+    private static readonly string[] OpcodeSources =
+    [
+        "https://github.com/kawaii/Hyperborea/raw/main/opcodes/{0}.txt",
+        "https://github.com/VeeverSW/Hyperborea/raw/main/opcodes/{0}.txt",
+    ];
 
     private OpcodeUpdater()
     {
@@ -42,7 +47,7 @@ public unsafe class OpcodeUpdater : IDisposable
         using var client = new HttpClient();
         try
         {
-            var result = client.GetStringAsync($"https://github.com/VeeverSW/Hyperborea/raw/main/opcodes/{gameVersion}.txt").Result.ReplaceLineEndings().Split(Environment.NewLine);
+            var result = DownloadOpcodeFile(client, gameVersion).ReplaceLineEndings().Split(Environment.NewLine);
             if (Disposed) throw new Exception("Opcode updater was disposed");
             foreach (var s in result)
             {
@@ -68,6 +73,28 @@ public unsafe class OpcodeUpdater : IDisposable
             PluginLog.Warning($"Failed to download opcodes for new game version");
             ex.LogWarning();
         }
+    }
+
+    private static string DownloadOpcodeFile(HttpClient client, string gameVersion)
+    {
+        Exception lastException = null;
+        foreach (var source in OpcodeSources)
+        {
+            var url = string.Format(source, gameVersion);
+            try
+            {
+                PluginLog.Information($"Downloading opcodes from {url}");
+                return client.GetStringAsync(url).Result;
+            }
+            catch (Exception ex)
+            {
+                lastException = ex;
+                PluginLog.Warning($"Failed to download opcodes from {url}");
+                ex.LogWarning();
+            }
+        }
+
+        throw new Exception($"No opcode source had data for {gameVersion}", lastException);
     }
 
     public static void Save()

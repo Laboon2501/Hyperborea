@@ -1,4 +1,6 @@
+using Dalamud.Game;
 using Dalamud.Interface.Components;
+using ECommons.Configuration;
 using ECommons.ExcelServices;
 using ECommons.ExcelServices.TerritoryEnumeration;
 using ECommons.GameHelpers;
@@ -26,6 +28,29 @@ public unsafe static class UI
     static Point3 Position = new(0,0,0);
     static bool SpawnOverride;
     static int CFCOverride = 0;
+    static string TerritorySearch = "";
+    const string TerritoryBrowserPopup = "浏览区域##HyperboreaTerritoryBrowser";
+    const string UnsafeTerritoryPopup = "确认加载风险区域##HyperboreaUnsafeTerritory";
+    static readonly ClientLanguage[] TerritorySearchLanguages = [ClientLanguage.English, ClientLanguage.Japanese, ClientLanguage.ChineseSimplified, ClientLanguage.ChineseTraditional];
+    static readonly TerritoryIntendedUseEnum[] RegularTerritoryUses =
+    [
+        TerritoryIntendedUseEnum.City_Area,
+        TerritoryIntendedUseEnum.Open_World,
+        TerritoryIntendedUseEnum.Housing_Instances,
+        TerritoryIntendedUseEnum.Residential_Area,
+        TerritoryIntendedUseEnum.Inn,
+        TerritoryIntendedUseEnum.Dungeon,
+        TerritoryIntendedUseEnum.Variant_Dungeon,
+        TerritoryIntendedUseEnum.Criterion_Duty,
+        TerritoryIntendedUseEnum.Criterion_Savage_Duty,
+        TerritoryIntendedUseEnum.Raid,
+        TerritoryIntendedUseEnum.Raid_2,
+        TerritoryIntendedUseEnum.Alliance_Raid,
+        TerritoryIntendedUseEnum.Large_Scale_Raid,
+        TerritoryIntendedUseEnum.Large_Scale_Savage_Raid,
+        TerritoryIntendedUseEnum.Trial,
+        TerritoryIntendedUseEnum.Deep_Dungeon,
+    ];
 
     public static void DrawNeo()
     {
@@ -148,10 +173,7 @@ public unsafe static class UI
                 ImGui.SetCursorPosX(ImGuiEx.GetWindowContentRegionWidth() - ImGuiHelpers.GetButtonSize("浏览").X - ImGuiHelpers.GetButtonSize("区域编辑器").X - 50f);
                 if (ImGuiComponents.IconButtonWithText((FontAwesomeIcon)0xf002, "浏览"))
                 {
-                    new TerritorySelector((uint)a2, (sel, x) =>
-                    {
-                        a2 = (int)x;
-                    });
+                    ImGui.OpenPopup(TerritoryBrowserPopup);
                 }
                 ImGui.SameLine();
                 if (ImGuiComponents.IconButtonWithText((FontAwesomeIcon)0xf303, "区域编辑器"))
@@ -163,14 +185,17 @@ public unsafe static class UI
                 ImGui.SetCursorPos(cur);
                 ImGuiEx.TextV("区域数据:");
                 ImGui.SetNextItemWidth(150);
-                var dis = TerritorySelector.Selectors.Any(x => x.IsOpen);
-                if (dis) ImGui.BeginDisabled();
                 ImGui.InputInt("区域 ID", ref a2);
-                if (dis) ImGui.EndDisabled();
                 if (ExcelTerritoryHelper.NameExists((uint)a2))
                 {
                     ImGuiEx.Text(ExcelTerritoryHelper.GetName((uint)a2));
                 }
+                if (ImGui.Checkbox("显示过场动画/事件专用地图", ref C.IncludeCutsceneEventTerritories))
+                {
+                    EzConfig.Save();
+                }
+                ImGuiEx.Tooltip("默认隐藏旧版区域浏览器不会列出的 TerritoryType；开启后会显示 cutscene/event-only 和缺少部分资料的区域。");
+                DrawSelectedTerritoryWarning((uint)Math.Max(a2, 0));
                 ImGuiEx.Text($"额外数据:");
                 ImGui.SetNextItemWidth(150);
                 var StoryValues = Utils.GetStoryValues((uint)a2);
@@ -252,16 +277,13 @@ public unsafe static class UI
                     if (disabled) ImGui.BeginDisabled();
                     if (ImGui.Button("加载区域"))
                     {
-                        Utils.TryGetZoneInfo(Utils.GetLayout((uint)a2), out var info2);
-                        SavedZoneState ??= new SavedZoneState(l->TerritoryTypeId, Player.Object.Position);
-                        Utils.LoadZone((uint)a2, !SpawnOverride, true, a3, a4, a5, a6, CFCOverride);
-                        if (SpawnOverride)
+                        if (ShouldConfirmTerritoryLoad((uint)Math.Max(a2, 0)))
                         {
-                            Player.GameObject->SetPosition(Position.X, Position.Y, Position.Z);
+                            ImGui.OpenPopup(UnsafeTerritoryPopup);
                         }
-                        else if (info2 != null && info2.Spawn != null)
+                        else
                         {
-                            Player.GameObject->SetPosition(info2.Spawn.X, info2.Spawn.Y, info2.Spawn.Z);
+                            LoadSelectedTerritory();
                         }
                     }
                     if (disabled) ImGui.EndDisabled();
@@ -283,12 +305,264 @@ public unsafe static class UI
             }
             ImGuiGroup.EndGroupBox();
         }
+        DrawTerritoryBrowserPopup();
+        DrawUnsafeTerritoryPopup();
     }
+
+    static void DrawTerritoryBrowserPopup()
+    {
+        if (!ImGui.BeginPopup(TerritoryBrowserPopup)) return;
+
+        ImGui.SetNextItemWidth(360f);
+        ImGui.InputTextWithHint("##territorySearch", "搜索 ID / 名称 / PlaceName / Map / Bg", ref TerritorySearch, 128);
+        ImGui.SameLine();
+        if (ImGui.Checkbox("显示过场动画/事件专用地图", ref C.IncludeCutsceneEventTerritories))
+        {
+            EzConfig.Save();
+        }
+
+        var entries = GetTerritoryEntries();
+        var regularCount = entries.Count(x => x.WasVisibleInOldSelector);
+        var extraCount = entries.Count - regularCount;
+        ImGuiEx.Text($"常规: {regularCount}  额外/风险: {extraCount}");
+
+        if (ImGui.BeginChild("##HyperboreaTerritoryBrowserChild", new Vector2(900f, 420f), true))
+        {
+            if (ImGui.BeginTable("##HyperboreaTerritoryBrowserTable", 7, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.NoSavedSettings | ImGuiTableFlags.SizingStretchProp))
+            {
+                ImGui.TableSetupColumn("选择", ImGuiTableColumnFlags.WidthFixed, 52f);
+                ImGui.TableSetupColumn("ID", ImGuiTableColumnFlags.WidthFixed, 56f);
+                ImGui.TableSetupColumn("名称", ImGuiTableColumnFlags.WidthStretch);
+                ImGui.TableSetupColumn("标签", ImGuiTableColumnFlags.WidthStretch);
+                ImGui.TableSetupColumn("Map", ImGuiTableColumnFlags.WidthStretch);
+                ImGui.TableSetupColumn("Bg", ImGuiTableColumnFlags.WidthStretch);
+                ImGui.TableSetupColumn("类型", ImGuiTableColumnFlags.WidthStretch);
+                ImGui.TableHeadersRow();
+
+                foreach (var entry in entries)
+                {
+                    if (!MatchesTerritorySearch(entry)) continue;
+
+                    ImGui.TableNextRow();
+                    ImGui.TableNextColumn();
+                    if (ImGui.Selectable($"选择##territory{entry.RowId}", a2 == entry.RowId))
+                    {
+                        a2 = (int)entry.RowId;
+                        ImGui.CloseCurrentPopup();
+                    }
+
+                    ImGui.TableNextColumn();
+                    ImGuiEx.Text($"{entry.RowId}");
+                    ImGui.TableNextColumn();
+                    ImGuiEx.Text(entry.DisplayName);
+                    ImGui.TableNextColumn();
+                    ImGuiEx.Text(entry.Tags.Print(" "));
+                    ImGui.TableNextColumn();
+                    ImGuiEx.Text(entry.MapText);
+                    ImGui.TableNextColumn();
+                    ImGuiEx.Text(entry.Bg);
+                    ImGui.TableNextColumn();
+                    ImGuiEx.Text(entry.IntendedUse);
+                }
+
+                ImGui.EndTable();
+            }
+        }
+        ImGui.EndChild();
+
+        if (ImGui.Button("关闭"))
+        {
+            ImGui.CloseCurrentPopup();
+        }
+
+        ImGui.EndPopup();
+    }
+
+    static void DrawUnsafeTerritoryPopup()
+    {
+        if (!ImGui.BeginPopup(UnsafeTerritoryPopup)) return;
+
+        var entry = CreateTerritoryEntry((uint)Math.Max(a2, 0));
+        ImGuiEx.TextWrapped(EColor.RedBright, "该区域可能是过场动画/事件专用或缺少 Map、PlaceName、出生点等资料。请确认已启用 Hyperborea，并准备使用出生点重定向、指南针或快速移动功能脱离异常位置。");
+        if (entry != null)
+        {
+            ImGuiEx.Text($"#{entry.RowId} {entry.DisplayName}");
+            ImGuiEx.Text(entry.Tags.Print(" "));
+        }
+
+        if (ImGui.Button("确认加载"))
+        {
+            LoadSelectedTerritory();
+            ImGui.CloseCurrentPopup();
+        }
+        ImGui.SameLine();
+        if (ImGui.Button("取消"))
+        {
+            ImGui.CloseCurrentPopup();
+        }
+
+        ImGui.EndPopup();
+    }
+
+    static void LoadSelectedTerritory()
+    {
+        if (a2 <= 0 || !Player.Available) return;
+        var l = LayoutWorld.Instance()->ActiveLayout;
+        if (l == null) return;
+
+        Utils.TryGetZoneInfo(Utils.GetLayout((uint)a2), out var info2);
+        SavedZoneState ??= new SavedZoneState(l->TerritoryTypeId, Player.Object.Position);
+        Utils.LoadZone((uint)a2, !SpawnOverride, true, a3, a4, a5, a6, CFCOverride);
+        if (SpawnOverride)
+        {
+            Player.GameObject->SetPosition(Position.X, Position.Y, Position.Z);
+        }
+        else if (info2 != null && info2.Spawn != null)
+        {
+            Player.GameObject->SetPosition(info2.Spawn.X, info2.Spawn.Y, info2.Spawn.Z);
+        }
+    }
+
+    static void DrawSelectedTerritoryWarning(uint territory)
+    {
+        var entry = CreateTerritoryEntry(territory);
+        if (entry == null || !entry.IsPotentiallyUnsafe) return;
+        ImGuiEx.TextWrapped(EColor.RedBright, $"风险标签: {entry.Tags.Print(" ")}");
+    }
+
+    static bool IsTerritoryPotentiallyUnsafe(uint territory)
+    {
+        var entry = CreateTerritoryEntry(territory);
+        return entry?.IsPotentiallyUnsafe == true;
+    }
+
+    static bool ShouldConfirmTerritoryLoad(uint territory)
+    {
+        var entry = CreateTerritoryEntry(territory);
+        return entry?.RequiresConfirmation == true;
+    }
+
+    static List<TerritoryBrowserEntry> GetTerritoryEntries()
+    {
+        var entries = new List<TerritoryBrowserEntry>();
+        foreach (var territory in Svc.Data.GetExcelSheet<TerritoryType>())
+        {
+            var entry = CreateTerritoryEntry(territory);
+            if (entry == null) continue;
+            if (!C.IncludeCutsceneEventTerritories && !entry.WasVisibleInOldSelector) continue;
+            entries.Add(entry);
+        }
+        return entries.OrderBy(x => x.RowId).ToList();
+    }
+
+    static TerritoryBrowserEntry CreateTerritoryEntry(uint territoryId)
+    {
+        var territory = Svc.Data.GetExcelSheet<TerritoryType>().GetRowOrDefault(territoryId);
+        return territory == null ? null : CreateTerritoryEntry(territory.Value);
+    }
+
+    static TerritoryBrowserEntry CreateTerritoryEntry(TerritoryType territory)
+    {
+        if (territory.RowId == 0) return null;
+
+        var bg = territory.Bg.GetText() ?? "";
+        var placeName = territory.PlaceName.ValueNullable?.Name.GetText() ?? "";
+        var zoneName = territory.PlaceNameZone.ValueNullable?.Name.GetText() ?? "";
+        var regionName = territory.PlaceNameRegion.ValueNullable?.Name.GetText() ?? "";
+        var cfcName = territory.ContentFinderCondition.ValueNullable?.Name.GetText() ?? "";
+        var questBattleName = territory.QuestBattle.ValueNullable?.Quest.GetValueOrDefault<Quest>()?.Name.GetText() ?? "";
+        var map = territory.Map.ValueNullable;
+        var mapName = map?.PlaceName.ValueNullable?.Name.GetText() ?? "";
+        var mapSubName = map?.PlaceNameSub.ValueNullable?.Name.GetText() ?? "";
+        var mapText = mapName.NullWhenEmpty() ?? mapSubName.NullWhenEmpty() ?? (territory.Map.RowId == 0 ? "" : $"#{territory.Map.RowId}");
+        var intendedUse = ((TerritoryIntendedUseEnum)territory.TerritoryIntendedUse.RowId).ToString().Replace("_", " ");
+        var localizedNames = TerritorySearchLanguages
+            .Select(language => ExcelTerritoryHelper.GetName(territory.RowId, false, language))
+            .Where(name => !name.IsNullOrEmpty() && !name.StartsWith("#"))
+            .Distinct()
+            .ToArray();
+
+        var hasAnyName = localizedNames.Length > 0
+            || !placeName.IsNullOrEmpty()
+            || !zoneName.IsNullOrEmpty()
+            || !regionName.IsNullOrEmpty()
+            || !cfcName.IsNullOrEmpty()
+            || !questBattleName.IsNullOrEmpty()
+            || !mapText.IsNullOrEmpty();
+        var hasBg = !bg.IsNullOrEmpty();
+        var hasMap = territory.Map.RowId != 0 && map != null;
+        var hasKnownSpawn = hasBg && Utils.TryGetZoneInfo(bg, out var zoneInfo) && zoneInfo.Spawn != null;
+        var hasContentFinder = territory.ContentFinderCondition.RowId != 0;
+        var isRegularUse = RegularTerritoryUses.Contains((TerritoryIntendedUseEnum)territory.TerritoryIntendedUse.RowId);
+        var wasVisibleInOldSelector = !placeName.IsNullOrEmpty();
+
+        if (!wasVisibleInOldSelector && !hasBg && !hasMap && !hasAnyName) return null;
+
+        var tags = new List<string>();
+        if (!wasVisibleInOldSelector && hasBg && !hasContentFinder) tags.Add("[Cutscene]");
+        if (!questBattleName.IsNullOrEmpty()) tags.Add("[Event]");
+        if (!hasMap) tags.Add("[No Map]");
+        if (!wasVisibleInOldSelector || !isRegularUse) tags.Add("[Inaccessible]");
+        if (!hasBg || !hasAnyName || !hasKnownSpawn) tags.Add("[Unsafe]");
+
+        return new TerritoryBrowserEntry
+        {
+            RowId = territory.RowId,
+            DisplayName = cfcName.NullWhenEmpty()
+                ?? placeName.NullWhenEmpty()
+                ?? questBattleName.NullWhenEmpty()
+                ?? localizedNames.FirstOrDefault()
+                ?? mapText.NullWhenEmpty()
+                ?? zoneName.NullWhenEmpty()
+                ?? bg.NullWhenEmpty()
+                ?? $"#{territory.RowId}",
+            SearchText = string.Join("\n", localizedNames
+                .Append($"{territory.RowId}")
+                .Append(placeName)
+                .Append(zoneName)
+                .Append(regionName)
+                .Append(cfcName)
+                .Append(questBattleName)
+                .Append(mapText)
+                .Append($"{territory.Map.RowId}")
+                .Append(bg)
+                .Append(intendedUse)
+                .Append(tags.Print(" "))),
+            MapText = mapText,
+            Bg = bg,
+            IntendedUse = intendedUse,
+            Tags = tags,
+            WasVisibleInOldSelector = wasVisibleInOldSelector,
+            IsPotentiallyUnsafe = tags.Count > 0,
+            RequiresConfirmation = !wasVisibleInOldSelector || !hasBg || !hasAnyName || !hasMap,
+        };
+    }
+
+    static bool MatchesTerritorySearch(TerritoryBrowserEntry entry)
+    {
+        if (TerritorySearch.IsNullOrEmpty()) return true;
+        return entry.SearchText.Contains(TerritorySearch, StringComparison.OrdinalIgnoreCase);
+    }
+
     internal static void CoordBlock(string t, ref float p)
     {
         ImGuiEx.TextV(t);
         ImGui.SameLine();
         ImGui.SetNextItemWidth(60f);
         ImGui.DragFloat("##" + t, ref p, 0.1f);
+    }
+
+    class TerritoryBrowserEntry
+    {
+        public uint RowId;
+        public string DisplayName = "";
+        public string SearchText = "";
+        public string MapText = "";
+        public string Bg = "";
+        public string IntendedUse = "";
+        public List<string> Tags = [];
+        public bool WasVisibleInOldSelector;
+        public bool IsPotentiallyUnsafe;
+        public bool RequiresConfirmation;
     }
 }

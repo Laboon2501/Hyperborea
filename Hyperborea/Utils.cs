@@ -60,6 +60,7 @@ public unsafe static class Utils
     public static ZoneInfo GetZoneInfo(string bg, out bool isOverriden)
     {
         isOverriden = false;
+        if (bg.IsNullOrEmpty()) return null;
         {
             if (P.ZoneData.Data.TryGetValue(bg, out var info))
             {

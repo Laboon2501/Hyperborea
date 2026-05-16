@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<Project Sdk="Dalamud.CN.NET.Sdk/14.0.1">
+<Project Sdk="Dalamud.CN.NET.Sdk/15.0.0">
 	<PropertyGroup>
 		<Authors>kawaii</Authors>
-		<Version>1.0.0.33</Version>
+		<Version>1.0.0.34</Version>
 	</PropertyGroup>
 
 	<PropertyGroup>
@@ -33,7 +33,6 @@
 	</ItemGroup>
 
 	<ItemGroup>
-		<PackageReference Include="DalamudPackager" Version="2.1.12" />
 		<PackageReference Include="YamlDotNet" Version="13.7.1" />
 		<Reference Include="Newtonsoft.Json">
 			<HintPath>$(DalamudLibPath)Newtonsoft.Json.dll</HintPath>
