@@ -59,7 +59,7 @@ public unsafe class Hyperborea : IDalamudPlugin
         {
             EzConfig.DefaultSerializationFactory = YamlFactory;
             var scale = ImGui.GetIO().FontGlobalScale;
-            var constraint = new Window.WindowSizeConstraints() { MinimumSize = new(300f * scale, 100f), MaximumSize = new(300f * scale, 1000f) };
+            var constraint = new Dalamud.Interface.Windowing.WindowSizeConstraints() { MinimumSize = new(300f * scale, 100f), MaximumSize = new(300f * scale, 1000f) };
             constraint.MaximumSize /= ImGuiHelpers.GlobalScaleSafe;
             constraint.MinimumSize /= ImGuiHelpers.GlobalScaleSafe;
             Config = EzConfig.Init<Config>();
@@ -172,7 +172,7 @@ public unsafe class Hyperborea : IDalamudPlugin
         InternalLog.Debug($"Map effect: {arg2}, {arg3}, {arg4}");
     }
 
-    private void OnTerritoryChanged(ushort obj)
+    private void OnTerritoryChanged(uint obj)
     {
         /*if (P.Enabled) return;
         TaskManager.Abort();

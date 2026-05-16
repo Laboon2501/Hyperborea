@@ -29,11 +29,7 @@
 	</PropertyGroup>
 
 	<ItemGroup>
-		<ProjectReference Include="..\ECommons\ECommons\ECommons.csproj" />
-	</ItemGroup>
-
-	<ItemGroup>
-		<PackageReference Include="DalamudPackager" Version="2.1.12" />
+		<PackageReference Include="ECommons" Version="3.2.0.19" />
 		<PackageReference Include="YamlDotNet" Version="13.7.1" />
 		<Reference Include="Newtonsoft.Json">
 			<HintPath>$(DalamudLibPath)Newtonsoft.Json.dll</HintPath>

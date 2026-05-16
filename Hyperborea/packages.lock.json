@@ -14,14 +14,17 @@
         "resolved": "1.2.39",
         "contentHash": "fcFN01tDTIQqDuTwr1jUQK/geofiwjG5DycJQOnC72i1SsLAk1ELe+apBOuZ11UMQG8YKFZG1FgvjZPbqHyatg=="
       },
+      "ECommons": {
+        "type": "Direct",
+        "requested": "[3.2.0.19, )",
+        "resolved": "3.2.0.19",
+        "contentHash": "yqRy0/6nuGx47c2Xaem7dyrQmV5Wv8aT5V6mQ1Rd03wPGsAFh+CbxDSFtBTGLxt2ZMW+anj4JoBlxj7KEFIMBg=="
+      },
       "YamlDotNet": {
         "type": "Direct",
         "requested": "[13.7.1, )",
         "resolved": "13.7.1",
         "contentHash": "X4m1PnFcJwvAj1sCDMntg/eZcX96CJLrWMiYnq41KqhFVZPuw63ZTSxIGqgdCwHWHvCAyTxheELC/VDf1HsU2A=="
-      },
-      "ecommons": {
-        "type": "Project"
       }
     }
   }
