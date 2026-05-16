@@ -8,6 +8,7 @@ using ECommons.ImGuiMethods.TerritorySelection;
 using FFXIVClientStructs.FFXIV.Client.Game.Event;
 using FFXIVClientStructs.FFXIV.Client.Graphics.Environment;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine;
+using Lumina.Excel;
 using Lumina.Excel.Sheets;
 using Hyperborea.Services;
 using ECommons.ChatMethods;
@@ -31,7 +32,19 @@ public unsafe static class UI
     static string TerritorySearch = "";
     const string TerritoryBrowserPopup = "浏览区域##HyperboreaTerritoryBrowser";
     const string UnsafeTerritoryPopup = "确认加载风险区域##HyperboreaUnsafeTerritory";
-    static readonly ClientLanguage[] TerritorySearchLanguages = [ClientLanguage.English, ClientLanguage.Japanese, ClientLanguage.ChineseSimplified, ClientLanguage.ChineseTraditional];
+    static readonly ClientLanguage[] TerritorySearchLanguageCandidates =
+    [
+        ClientLanguage.Japanese,
+        ClientLanguage.English,
+        ClientLanguage.German,
+        ClientLanguage.French,
+        ClientLanguage.ChineseSimplified,
+        ClientLanguage.ChineseTraditional,
+        ClientLanguage.Korean,
+    ];
+    static readonly Dictionary<ClientLanguage, bool> TerritoryLanguageSupport = [];
+    static readonly HashSet<string> TerritoryBrowserLoggedWarnings = [];
+    static bool TerritoryBrowserUsedFallbackNames;
     static readonly TerritoryIntendedUseEnum[] RegularTerritoryUses =
     [
         TerritoryIntendedUseEnum.City_Area,
@@ -186,9 +199,10 @@ public unsafe static class UI
                 ImGuiEx.TextV("区域数据:");
                 ImGui.SetNextItemWidth(150);
                 ImGui.InputInt("区域 ID", ref a2);
-                if (ExcelTerritoryHelper.NameExists((uint)a2))
+                var selectedTerritoryEntry = CreateTerritoryEntry((uint)Math.Max(a2, 0));
+                if (selectedTerritoryEntry != null)
                 {
-                    ImGuiEx.Text(ExcelTerritoryHelper.GetName((uint)a2));
+                    ImGuiEx.Text(selectedTerritoryEntry.DisplayName);
                 }
                 if (ImGui.Checkbox("显示过场动画/事件专用地图", ref C.IncludeCutsceneEventTerritories))
                 {
@@ -301,7 +315,8 @@ public unsafe static class UI
             }
             catch(Exception e)
             {
-                ImGuiEx.Text(e.ToString());
+                LogTerritoryBrowserWarningOnce("ZoneDataDraw", e, "Failed to draw zone data.");
+                ImGuiEx.TextWrapped(EColor.RedBright, "区域数据读取失败，已写入插件日志。");
             }
             ImGuiGroup.EndGroupBox();
         }
@@ -325,6 +340,10 @@ public unsafe static class UI
         var regularCount = entries.Count(x => x.WasVisibleInOldSelector);
         var extraCount = entries.Count - regularCount;
         ImGuiEx.Text($"常规: {regularCount}  额外/风险: {extraCount}");
+        if (TerritoryBrowserUsedFallbackNames)
+        {
+            ImGuiEx.TextWrapped(EColor.YellowBright, "部分区域名称读取失败，已使用 Territory ID 代替。");
+        }
 
         if (ImGui.BeginChild("##HyperboreaTerritoryBrowserChild", new Vector2(900f, 420f), true))
         {
@@ -445,7 +464,21 @@ public unsafe static class UI
     static List<TerritoryBrowserEntry> GetTerritoryEntries()
     {
         var entries = new List<TerritoryBrowserEntry>();
-        foreach (var territory in Svc.Data.GetExcelSheet<TerritoryType>())
+        var sheet = GetSafeTerritorySheet();
+        if (sheet == null) return entries;
+
+        List<TerritoryType> territories;
+        try
+        {
+            territories = sheet.ToList();
+        }
+        catch (Exception e)
+        {
+            LogTerritoryBrowserWarningOnce("TerritorySheetEnumeration", e, "Failed to enumerate territory sheet.");
+            return entries;
+        }
+
+        foreach (var territory in territories)
         {
             var entry = CreateTerritoryEntry(territory);
             if (entry == null) continue;
@@ -455,34 +488,46 @@ public unsafe static class UI
         return entries.OrderBy(x => x.RowId).ToList();
     }
 
-    static TerritoryBrowserEntry CreateTerritoryEntry(uint territoryId)
+    static TerritoryBrowserEntry? CreateTerritoryEntry(uint territoryId)
     {
-        var territory = Svc.Data.GetExcelSheet<TerritoryType>().GetRowOrDefault(territoryId);
-        return territory == null ? null : CreateTerritoryEntry(territory.Value);
+        if (territoryId == 0) return null;
+        return TryGetTerritoryRow(territoryId, out var territory)
+            ? CreateTerritoryEntry(territory)
+            : CreateFallbackTerritoryEntry(territoryId);
     }
 
-    static TerritoryBrowserEntry CreateTerritoryEntry(TerritoryType territory)
+    static TerritoryBrowserEntry? CreateTerritoryEntry(TerritoryType territory)
     {
         if (territory.RowId == 0) return null;
 
-        var bg = territory.Bg.GetText() ?? "";
-        var placeName = territory.PlaceName.ValueNullable?.Name.GetText() ?? "";
-        var zoneName = territory.PlaceNameZone.ValueNullable?.Name.GetText() ?? "";
-        var regionName = territory.PlaceNameRegion.ValueNullable?.Name.GetText() ?? "";
-        var cfcName = territory.ContentFinderCondition.ValueNullable?.Name.GetText() ?? "";
-        var questBattleName = territory.QuestBattle.ValueNullable?.Quest.GetValueOrDefault<Quest>()?.Name.GetText() ?? "";
-        var map = territory.Map.ValueNullable;
-        var mapName = map?.PlaceName.ValueNullable?.Name.GetText() ?? "";
-        var mapSubName = map?.PlaceNameSub.ValueNullable?.Name.GetText() ?? "";
+        try
+        {
+            return CreateTerritoryEntryCore(territory);
+        }
+        catch (Exception e)
+        {
+            return CreateFallbackTerritoryEntry(territory.RowId, e);
+        }
+    }
+
+    static TerritoryBrowserEntry CreateTerritoryEntryCore(TerritoryType territory)
+    {
+        var bg = ReadTerritoryText(() => territory.Bg.GetText() ?? "", "Territory.Bg");
+        var territoryName = ReadTerritoryText(() => territory.Name.GetText() ?? "", "Territory.Name");
+        var placeName = ReadTerritoryText(() => territory.PlaceName.ValueNullable?.Name.GetText() ?? "", "Territory.PlaceName");
+        var zoneName = ReadTerritoryText(() => territory.PlaceNameZone.ValueNullable?.Name.GetText() ?? "", "Territory.PlaceNameZone");
+        var regionName = ReadTerritoryText(() => territory.PlaceNameRegion.ValueNullable?.Name.GetText() ?? "", "Territory.PlaceNameRegion");
+        var cfcName = ReadTerritoryText(() => territory.ContentFinderCondition.ValueNullable?.Name.GetText() ?? "", "Territory.ContentFinderCondition");
+        var questBattleName = ReadTerritoryText(() => territory.QuestBattle.ValueNullable?.Quest.GetValueOrDefault<Quest>()?.Name.GetText() ?? "", "Territory.QuestBattle");
+        var map = ReadTerritoryValue(() => territory.Map.ValueNullable, "Territory.Map");
+        var mapName = ReadTerritoryText(() => map?.PlaceName.ValueNullable?.Name.GetText() ?? "", "Map.PlaceName");
+        var mapSubName = ReadTerritoryText(() => map?.PlaceNameSub.ValueNullable?.Name.GetText() ?? "", "Map.PlaceNameSub");
         var mapText = mapName.NullWhenEmpty() ?? mapSubName.NullWhenEmpty() ?? (territory.Map.RowId == 0 ? "" : $"#{territory.Map.RowId}");
         var intendedUse = ((TerritoryIntendedUseEnum)territory.TerritoryIntendedUse.RowId).ToString().Replace("_", " ");
-        var localizedNames = TerritorySearchLanguages
-            .Select(language => ExcelTerritoryHelper.GetName(territory.RowId, false, language))
-            .Where(name => !name.IsNullOrEmpty() && !name.StartsWith("#"))
-            .Distinct()
-            .ToArray();
+        var localizedNames = GetLocalizedTerritoryNames(territory.RowId);
 
         var hasAnyName = localizedNames.Length > 0
+            || !territoryName.IsNullOrEmpty()
             || !placeName.IsNullOrEmpty()
             || !zoneName.IsNullOrEmpty()
             || !regionName.IsNullOrEmpty()
@@ -494,15 +539,15 @@ public unsafe static class UI
         var hasKnownSpawn = hasBg && Utils.TryGetZoneInfo(bg, out var zoneInfo) && zoneInfo.Spawn != null;
         var hasContentFinder = territory.ContentFinderCondition.RowId != 0;
         var isRegularUse = RegularTerritoryUses.Contains((TerritoryIntendedUseEnum)territory.TerritoryIntendedUse.RowId);
-        var wasVisibleInOldSelector = !placeName.IsNullOrEmpty();
-
-        if (!wasVisibleInOldSelector && !hasBg && !hasMap && !hasAnyName) return null;
+        var wasVisibleInOldSelector = !placeName.IsNullOrEmpty() || !cfcName.IsNullOrEmpty() || !questBattleName.IsNullOrEmpty();
 
         var tags = new List<string>();
         if (!wasVisibleInOldSelector && hasBg && !hasContentFinder) tags.Add("[Cutscene]");
         if (!questBattleName.IsNullOrEmpty()) tags.Add("[Event]");
         if (!hasMap) tags.Add("[No Map]");
+        if (placeName.IsNullOrEmpty()) tags.Add("[No PlaceName]");
         if (!wasVisibleInOldSelector || !isRegularUse) tags.Add("[Inaccessible]");
+        if (!hasAnyName) tags.Add("[MissingName]");
         if (!hasBg || !hasAnyName || !hasKnownSpawn) tags.Add("[Unsafe]");
 
         return new TerritoryBrowserEntry
@@ -511,13 +556,16 @@ public unsafe static class UI
             DisplayName = cfcName.NullWhenEmpty()
                 ?? placeName.NullWhenEmpty()
                 ?? questBattleName.NullWhenEmpty()
+                ?? territoryName.NullWhenEmpty()
                 ?? localizedNames.FirstOrDefault()
                 ?? mapText.NullWhenEmpty()
                 ?? zoneName.NullWhenEmpty()
                 ?? bg.NullWhenEmpty()
-                ?? $"#{territory.RowId}",
+                ?? $"Territory {territory.RowId}",
             SearchText = string.Join("\n", localizedNames
                 .Append($"{territory.RowId}")
+                .Append($"Territory {territory.RowId}")
+                .Append(territoryName)
                 .Append(placeName)
                 .Append(zoneName)
                 .Append(regionName)
@@ -536,6 +584,194 @@ public unsafe static class UI
             IsPotentiallyUnsafe = tags.Count > 0,
             RequiresConfirmation = !wasVisibleInOldSelector || !hasBg || !hasAnyName || !hasMap,
         };
+    }
+
+    static TerritoryBrowserEntry CreateFallbackTerritoryEntry(uint territoryId, Exception? e = null)
+    {
+        TerritoryBrowserUsedFallbackNames = true;
+        if (e != null)
+        {
+            LogTerritoryBrowserWarningOnce($"TerritoryEntry:{territoryId}", e, $"Failed to create territory entry {territoryId}.");
+        }
+
+        return new TerritoryBrowserEntry
+        {
+            RowId = territoryId,
+            DisplayName = $"Territory {territoryId}",
+            SearchText = $"{territoryId}\nTerritory {territoryId}",
+            MapText = "",
+            Bg = "",
+            IntendedUse = "",
+            Tags = ["[No Map]", "[No PlaceName]", "[MissingName]", "[Unsafe]"],
+            WasVisibleInOldSelector = false,
+            IsPotentiallyUnsafe = true,
+            RequiresConfirmation = true,
+        };
+    }
+
+    static ExcelSheet<TerritoryType>? GetSafeTerritorySheet()
+    {
+        foreach (var language in GetSafeTerritorySearchLanguages())
+        {
+            try
+            {
+                var sheet = Svc.Data.GetExcelSheet<TerritoryType>(language);
+                if (sheet != null) return sheet;
+            }
+            catch (Exception e)
+            {
+                LogTerritoryBrowserWarningOnce($"TerritorySheet:{language}", e, $"Failed to load TerritoryType sheet for {language}.");
+            }
+        }
+
+        return null;
+    }
+
+    static bool TryGetTerritoryRow(uint territoryId, out TerritoryType territory)
+    {
+        territory = default;
+        var sheet = GetSafeTerritorySheet();
+        if (sheet == null) return false;
+
+        try
+        {
+            return sheet.TryGetRow(territoryId, out territory);
+        }
+        catch (Exception e)
+        {
+            LogTerritoryBrowserWarningOnce($"TerritoryRow:{territoryId}", e, $"Failed to read territory row {territoryId}.");
+            return false;
+        }
+    }
+
+    static IEnumerable<ClientLanguage> GetSafeTerritorySearchLanguages()
+    {
+        var seen = new HashSet<ClientLanguage>();
+        foreach (var language in GetPreferredTerritoryLanguageCandidates())
+        {
+            if (!seen.Add(language)) continue;
+            if (IsSupportedTerritoryLanguage(language)) yield return language;
+        }
+    }
+
+    static IEnumerable<ClientLanguage> GetPreferredTerritoryLanguageCandidates()
+    {
+        yield return Svc.ClientState.ClientLanguage;
+        yield return ClientLanguage.English;
+        foreach (var language in TerritorySearchLanguageCandidates)
+        {
+            yield return language;
+        }
+    }
+
+    static bool IsSupportedTerritoryLanguage(ClientLanguage language)
+    {
+        if (IsInvalidExcelLanguage(language)) return false;
+        if (TerritoryLanguageSupport.TryGetValue(language, out var supported)) return supported;
+
+        try
+        {
+            var sheet = Svc.Data.GetExcelSheet<TerritoryType>(language);
+            if (sheet != null)
+            {
+                _ = sheet.Count;
+                supported = true;
+            }
+            else
+            {
+                supported = false;
+            }
+        }
+        catch (Exception e)
+        {
+            supported = false;
+            TerritoryBrowserUsedFallbackNames = true;
+            LogTerritoryBrowserWarningOnce($"UnsupportedLanguage:{language}", e, $"Skipping unsupported territory language {language}.");
+        }
+
+        TerritoryLanguageSupport[language] = supported;
+        return supported;
+    }
+
+    static bool IsInvalidExcelLanguage(ClientLanguage language)
+    {
+        var name = language.ToString();
+        return name.Equals("None", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("Unknown", StringComparison.OrdinalIgnoreCase);
+    }
+
+    static string[] GetLocalizedTerritoryNames(uint territoryId)
+    {
+        var names = new List<string>();
+        foreach (var language in GetSafeTerritorySearchLanguages())
+        {
+            var name = GetLocalizedTerritoryName(territoryId, language);
+            if (name.IsNullOrEmpty() || name.StartsWith("#")) continue;
+            if (!names.Contains(name)) names.Add(name);
+        }
+        return names.ToArray();
+    }
+
+    static string GetLocalizedTerritoryName(uint territoryId, ClientLanguage language)
+    {
+        try
+        {
+            var sheet = Svc.Data.GetExcelSheet<TerritoryType>(language);
+            if (sheet == null) return "";
+
+            var territory = sheet.GetRowOrDefault(territoryId);
+            if (territory == null) return "";
+
+            var row = territory.Value;
+            var cfcName = ReadTerritoryText(() => row.ContentFinderCondition.ValueNullable?.Name.GetText() ?? "", $"LocalizedName.{language}.ContentFinderCondition");
+            if (!cfcName.IsNullOrEmpty()) return cfcName;
+
+            var placeName = ReadTerritoryText(() => row.PlaceName.ValueNullable?.Name.GetText() ?? "", $"LocalizedName.{language}.PlaceName");
+            if (!placeName.IsNullOrEmpty()) return placeName;
+
+            var territoryName = ReadTerritoryText(() => row.Name.GetText() ?? "", $"LocalizedName.{language}.TerritoryName");
+            return territoryName;
+        }
+        catch (Exception e)
+        {
+            TerritoryBrowserUsedFallbackNames = true;
+            LogTerritoryBrowserWarningOnce($"LocalizedName:{language}", e, $"Failed to read localized territory names for {language}.");
+            return "";
+        }
+    }
+
+    static string ReadTerritoryText(Func<string?> read, string context)
+    {
+        try
+        {
+            return read() ?? "";
+        }
+        catch (Exception e)
+        {
+            TerritoryBrowserUsedFallbackNames = true;
+            LogTerritoryBrowserWarningOnce($"TerritoryText:{context}", e, $"Failed to read {context}.");
+            return "";
+        }
+    }
+
+    static T? ReadTerritoryValue<T>(Func<T?> read, string context) where T : struct
+    {
+        try
+        {
+            return read();
+        }
+        catch (Exception e)
+        {
+            LogTerritoryBrowserWarningOnce($"TerritoryValue:{context}", e, $"Failed to read {context}.");
+            return null;
+        }
+    }
+
+    static void LogTerritoryBrowserWarningOnce(string key, Exception e, string message)
+    {
+        var warningKey = $"{key}:{e.GetType().FullName}:{e.Message}";
+        if (!TerritoryBrowserLoggedWarnings.Add(warningKey)) return;
+        PluginLog.Warning($"[TerritoryBrowser] {message} {e.GetType().Name}: {e.Message}");
     }
 
     static bool MatchesTerritorySearch(TerritoryBrowserEntry entry)
