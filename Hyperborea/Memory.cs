@@ -73,11 +73,12 @@ public unsafe class Memory
         try
         {
             LoadPrefetchLayoutHook = new((nint)LayoutWorld.Addresses.LoadPrefetchLayout.Value, LoadPrefetchLayoutDetour, true);
-            PluginLog.Information("[DirectBgPath] LoadPrefetchLayout hook initialized.");
+            PluginLog.Information($"[DirectBgPath] Hook installed: LoadPrefetchLayout = {LoadPrefetchLayoutHook.IsEnabled}");
         }
         catch (Exception e)
         {
-            PluginLog.Warning($"[DirectBgPath] Failed to initialize LoadPrefetchLayout hook. {e.GetType().Name}: {e.Message}");
+            PluginLog.Warning($"[DirectBgPath] Hook installed: LoadPrefetchLayout = false");
+            PluginLog.Warning($"[DirectBgPath] Hook install failed: LoadPrefetchLayout. {e.GetType().Name}: {e.Message}");
         }
     }
 

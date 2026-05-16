@@ -611,16 +611,24 @@ public unsafe static class UI
     {
         var service = S.DirectBgPathEntry;
         service.Update();
-        ImGuiEx.Text($"Direct BgPath: {service.State}  Carrier: {(C.DirectBgPathCarrierTerritoryId == 0 ? "未配置" : C.DirectBgPathCarrierTerritoryId.ToString())}  Hook: {(service.IsHookReady ? "OK" : "不可用")}");
+        ImGuiEx.Text($"DirectBgPath State: {service.State}  Carrier: {(C.DirectBgPathCarrierTerritoryId == 0 ? "未配置" : C.DirectBgPathCarrierTerritoryId.ToString())}  Hook: {(service.IsHookReady ? "OK" : "不可用")}");
         if (!service.TargetPath.IsNullOrEmpty())
         {
-            ImGuiEx.TextWrapped($"Target: {service.TargetPath}  Hits: {service.OverrideHits}");
+            ImGuiEx.TextWrapped($"Last target: {service.TargetPath}  Hits: {service.OverrideHits}");
+        }
+        if (service.LastLogTime != null)
+        {
+            ImGuiEx.Text($"Last log time: {service.LastLogTime:yyyy-MM-dd HH:mm:ss}");
         }
         if (!service.LastError.IsNullOrEmpty())
         {
-            ImGuiEx.TextWrapped(EColor.RedBright, $"Direct BgPath error: {service.LastError}");
+            ImGuiEx.TextWrapped(EColor.RedBright, $"Last error: {service.LastError}");
+            if (service.State == DirectBgPathState.TimedOut)
+            {
+                ImGuiEx.TextWrapped(EColor.YellowBright, "hook 没命中，当前 hook 点可能不适合国服客户端，需要更换更底层的 bg/scene resolve hook。");
+            }
         }
-        if (service.State is DirectBgPathState.Preparing or DirectBgPathState.Active)
+        if (service.State is DirectBgPathState.Requested or DirectBgPathState.EnteringCarrier or DirectBgPathState.WaitingForOverrideHook or DirectBgPathState.OverrideHit or DirectBgPathState.Completed)
         {
             if (ImGui.Button("清除 DirectBgPath Override"))
             {
@@ -648,6 +656,16 @@ public unsafe static class UI
             S.DirectBgPathEntry.SetCarrier(entry.RowId);
         }
 
+        var carrierOk = S.DirectBgPathEntry.TryGetCarrierInfo(C.DirectBgPathCarrierTerritoryId, out var carrierBg, out var carrierError);
+        if (carrierOk)
+        {
+            ImGuiEx.TextWrapped($"Carrier Bg: {carrierBg}");
+        }
+        else if (C.DirectBgPathCarrierTerritoryId != 0)
+        {
+            ImGuiEx.TextWrapped(EColor.RedBright, $"Carrier 无效: {carrierError}");
+        }
+
         if (C.DirectBgPathCarrierTerritoryId == 0)
         {
             ImGuiEx.TextWrapped(EColor.YellowBright, "该条目缺少 TerritoryType。可作为线索搜索；若要尝试进入，请先配置 Direct BgPath Carrier。");
@@ -662,17 +680,26 @@ public unsafe static class UI
             ImGui.SetClipboardText(entry.Bg);
         }
         ImGui.SameLine();
-        var disabled = C.DirectBgPathCarrierTerritoryId == 0 || !S.DirectBgPathEntry.IsHookReady || !Utils.CanUse();
-        if (disabled) ImGui.BeginDisabled();
+        if (ImGui.Button("测试 Carrier"))
+        {
+            LoadCarrierTest();
+        }
+        ImGui.SameLine();
+        if (ImGui.Button("DirectBgPath 诊断"))
+        {
+            S.DirectBgPathEntry.LogDiagnostic(entry);
+        }
+        ImGui.SameLine();
+        if (ImGui.Button("清除 DirectBgPath 状态"))
+        {
+            S.DirectBgPathEntry.Clear("user cleared direct state");
+        }
+
         if (ImGui.Button("使用 Direct BgPath 尝试进入"))
         {
             SelectedTerritoryBrowserKey = entry.Key;
-            ImGui.OpenPopup(DirectBgPathPopup);
-        }
-        if (disabled) ImGui.EndDisabled();
-        if (disabled && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-        {
-            ImGuiEx.Tooltip("需要启用 Hyperborea、配置 carrier，并成功初始化 LoadPrefetchLayout hook。");
+            S.DirectBgPathEntry.ButtonClicked(entry);
+            LoadDirectBgPath(entry);
         }
     }
 
@@ -702,11 +729,46 @@ public unsafe static class UI
 
     static void LoadDirectBgPath(TerritoryBrowserEntry entry)
     {
-        if (entry.Bg.IsNullOrEmpty() || !Player.Available) return;
+        if (entry.Bg.IsNullOrEmpty())
+        {
+            S.DirectBgPathEntry.Fail("entry has no bg path");
+            return;
+        }
+        if (!Player.Available)
+        {
+            S.DirectBgPathEntry.Fail("player is not available");
+            return;
+        }
         var l = LayoutWorld.Instance()->ActiveLayout;
-        if (l == null) return;
+        if (l == null)
+        {
+            S.DirectBgPathEntry.Fail("active layout is not available");
+            return;
+        }
         SavedZoneState ??= new SavedZoneState(l->TerritoryTypeId, Player.Object.Position);
         var loaded = S.DirectBgPathEntry.TryEnter(entry, !SpawnOverride, true, a3, a4, a5, a6, CFCOverride);
+        if (loaded && SpawnOverride)
+        {
+            Player.GameObject->SetPosition(Position.X, Position.Y, Position.Z);
+        }
+    }
+
+    static void LoadCarrierTest()
+    {
+        if (!Player.Available)
+        {
+            S.DirectBgPathEntry.Fail("player is not available");
+            return;
+        }
+        var l = LayoutWorld.Instance()->ActiveLayout;
+        if (l == null)
+        {
+            S.DirectBgPathEntry.Fail("active layout is not available");
+            return;
+        }
+
+        SavedZoneState ??= new SavedZoneState(l->TerritoryTypeId, Player.Object.Position);
+        var loaded = S.DirectBgPathEntry.TryTestCarrier(!SpawnOverride, true, a3, a4, a5, a6, CFCOverride);
         if (loaded && SpawnOverride)
         {
             Player.GameObject->SetPosition(Position.X, Position.Y, Position.Z);
