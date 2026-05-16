@@ -130,6 +130,7 @@ public unsafe class Hyperborea : IDalamudPlugin
     bool IsLButtonPressed = false;
     private void Tick()
     {
+        S.DirectBgPathEntry.Update();
         if(Enabled)
         {
             if (C.FastTeleport)
@@ -202,6 +203,7 @@ public unsafe class Hyperborea : IDalamudPlugin
 
     private void OnTerritoryChanged(uint obj)
     {
+        S.DirectBgPathEntry.OnTerritoryChanged(obj);
         /*if (P.Enabled) return;
         TaskManager.Abort();
         TaskManager.Enqueue(() =>

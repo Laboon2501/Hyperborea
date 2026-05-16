@@ -612,9 +612,22 @@ public unsafe static class UI
         var service = S.DirectBgPathEntry;
         service.Update();
         ImGuiEx.Text($"DirectBgPath State: {service.State}  Carrier: {(C.DirectBgPathCarrierTerritoryId == 0 ? "未配置" : C.DirectBgPathCarrierTerritoryId.ToString())}  Hook: {(service.IsHookReady ? "OK" : "不可用")}");
+        ImGuiEx.Text($"Attempt: {(service.AttemptId == 0 ? "-" : service.AttemptId.ToString())}  ResourceProbe: {(C.DirectBgPathResourceProbe ? "ON" : "OFF")}");
         if (!service.TargetPath.IsNullOrEmpty())
         {
             ImGuiEx.TextWrapped($"Last target: {service.TargetPath}  Hits: {service.OverrideHits}");
+        }
+        if (!service.LastOriginalBgPath.IsNullOrEmpty())
+        {
+            ImGuiEx.TextWrapped($"Last override: {service.LastOriginalBgPath} -> {service.LastReplacementPath}");
+        }
+        if (!service.LastResourceProbePath.IsNullOrEmpty())
+        {
+            ImGuiEx.TextWrapped($"Last probe: {service.LastResourceProbePath}");
+        }
+        if (service.TerritoryBefore != 0 || service.LastObservedTerritory != 0)
+        {
+            ImGuiEx.Text($"Territory: before {service.TerritoryBefore}  last {service.LastObservedTerritory}");
         }
         if (service.LastLogTime != null)
         {
@@ -628,9 +641,13 @@ public unsafe static class UI
                 ImGuiEx.TextWrapped(EColor.YellowBright, "hook 没命中，当前 hook 点可能不适合国服客户端，需要更换更底层的 bg/scene resolve hook。");
             }
         }
+        if (service.IsBusy)
+        {
+            ImGuiEx.TextWrapped(EColor.YellowBright, "DirectBgPath 正在尝试进入，请等待或点击取消。");
+        }
         if (service.State is DirectBgPathState.Requested or DirectBgPathState.EnteringCarrier or DirectBgPathState.WaitingForOverrideHook or DirectBgPathState.OverrideHit or DirectBgPathState.Completed)
         {
-            if (ImGui.Button("清除 DirectBgPath Override"))
+            if (ImGui.Button(service.IsBusy ? "取消 DirectBgPath" : "清除 DirectBgPath Override"))
             {
                 service.Clear("user cleared override");
             }
@@ -666,6 +683,13 @@ public unsafe static class UI
             ImGuiEx.TextWrapped(EColor.RedBright, $"Carrier 无效: {carrierError}");
         }
 
+        var probe = C.DirectBgPathResourceProbe;
+        if (ImGui.Checkbox("DirectBgPath Resource Probe", ref probe))
+        {
+            C.DirectBgPathResourceProbe = probe;
+            EzConfig.Save();
+        }
+
         if (C.DirectBgPathCarrierTerritoryId == 0)
         {
             ImGuiEx.TextWrapped(EColor.YellowBright, "该条目缺少 TerritoryType。可作为线索搜索；若要尝试进入，请先配置 Direct BgPath Carrier。");
@@ -695,11 +719,22 @@ public unsafe static class UI
             S.DirectBgPathEntry.Clear("user cleared direct state");
         }
 
+        var directBusy = S.DirectBgPathEntry.IsBusy;
+        if (directBusy)
+        {
+            ImGui.BeginDisabled();
+        }
         if (ImGui.Button("使用 Direct BgPath 尝试进入"))
         {
             SelectedTerritoryBrowserKey = entry.Key;
-            S.DirectBgPathEntry.ButtonClicked(entry);
-            LoadDirectBgPath(entry);
+            if (S.DirectBgPathEntry.ButtonClicked(entry))
+            {
+                LoadDirectBgPath(entry);
+            }
+        }
+        if (directBusy)
+        {
+            ImGui.EndDisabled();
         }
     }
 
@@ -716,7 +751,10 @@ public unsafe static class UI
 
         if (ImGui.Button("确认 Direct BgPath 进入") && entry != null)
         {
-            LoadDirectBgPath(entry);
+            if (S.DirectBgPathEntry.ButtonClicked(entry))
+            {
+                LoadDirectBgPath(entry);
+            }
             ImGui.CloseCurrentPopup();
         }
         ImGui.SameLine();

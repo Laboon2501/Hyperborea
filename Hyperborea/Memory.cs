@@ -7,6 +7,8 @@ using FFXIVClientStructs.FFXIV.Application.Network;
 using FFXIVClientStructs.FFXIV.Client.Graphics.Environment;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine;
 using FFXIVClientStructs.FFXIV.Client.Network;
+using FFXIVClientStructs.FFXIV.Client.System.Resource;
+using FFXIVClientStructs.FFXIV.Client.System.Resource.Handle;
 using Hyperborea.Services;
 using InteropGenerator.Runtime;
 using Lumina.Excel.Sheets;
@@ -24,6 +26,8 @@ public unsafe class Memory
     internal EzHook<LoadZone> LoadZoneHook;
 
     internal EzHook<LayoutWorld.Delegates.LoadPrefetchLayout>? LoadPrefetchLayoutHook;
+    internal EzHook<ResourceManager.Delegates.GetResourceSync>? ResourceManagerGetResourceSyncHook;
+    internal EzHook<ResourceManager.Delegates.GetResourceAsync>? ResourceManagerGetResourceAsyncHook;
 
     internal EzHook<PacketDispatcher.Delegates.OnReceivePacket> PacketDispatcher_OnReceivePacketHook;
     internal EzHook<PacketDispatcher.Delegates.OnReceivePacket> PacketDispatcher_OnReceivePacketMonitorHook;
@@ -79,6 +83,26 @@ public unsafe class Memory
         {
             PluginLog.Warning($"[DirectBgPath] Hook installed: LoadPrefetchLayout = false");
             PluginLog.Warning($"[DirectBgPath] Hook install failed: LoadPrefetchLayout. {e.GetType().Name}: {e.Message}");
+        }
+        try
+        {
+            ResourceManagerGetResourceSyncHook = new((nint)ResourceManager.Addresses.GetResourceSync.Value, ResourceManagerGetResourceSyncDetour, true);
+            PluginLog.Information($"[DirectBgPath] Hook installed: ResourceManager.GetResourceSync = {ResourceManagerGetResourceSyncHook.IsEnabled}");
+        }
+        catch (Exception e)
+        {
+            PluginLog.Warning($"[DirectBgPath] Hook installed: ResourceManager.GetResourceSync = false");
+            PluginLog.Warning($"[DirectBgPath] Hook install failed: ResourceManager.GetResourceSync. {e.GetType().Name}: {e.Message}");
+        }
+        try
+        {
+            ResourceManagerGetResourceAsyncHook = new((nint)ResourceManager.Addresses.GetResourceAsync.Value, ResourceManagerGetResourceAsyncDetour, true);
+            PluginLog.Information($"[DirectBgPath] Hook installed: ResourceManager.GetResourceAsync = {ResourceManagerGetResourceAsyncHook.IsEnabled}");
+        }
+        catch (Exception e)
+        {
+            PluginLog.Warning($"[DirectBgPath] Hook installed: ResourceManager.GetResourceAsync = false");
+            PluginLog.Warning($"[DirectBgPath] Hook install failed: ResourceManager.GetResourceAsync. {e.GetType().Name}: {e.Message}");
         }
     }
 
@@ -273,11 +297,15 @@ public unsafe class Memory
     {
         try
         {
-            var originalPath = CStringPointerToString(path);
-            if (global::Hyperborea.Services.S.DirectBgPathEntry.TryGetOverridePath(originalPath, out var overridePathPtr))
+            var directBgPath = global::Hyperborea.Services.S.DirectBgPathEntry;
+            if (directBgPath.HasPendingOverride)
             {
-                LoadPrefetchLayoutHook!.Original(self, a2, (byte*)overridePathPtr, a4, a5, a6, festivals, a8);
-                return;
+                var originalPath = CStringPointerToString(path);
+                if (directBgPath.TryGetOverridePath(originalPath, out var overridePathPtr))
+                {
+                    LoadPrefetchLayoutHook!.Original(self, a2, (byte*)overridePathPtr, a4, a5, a6, festivals, a8);
+                    return;
+                }
             }
         }
         catch (Exception e)
@@ -285,6 +313,52 @@ public unsafe class Memory
             PluginLog.Warning($"[DirectBgPath] LoadPrefetchLayout detour failed. {e.GetType().Name}: {e.Message}");
         }
         LoadPrefetchLayoutHook!.Original(self, a2, path, a4, a5, a6, festivals, a8);
+    }
+
+    internal ResourceHandle* ResourceManagerGetResourceSyncDetour(ResourceManager* self, ResourceCategory* category, uint* resourceType, uint* resourceHash, CStringPointer path, void* listener, void* unk, uint flags)
+    {
+        try
+        {
+            var directBgPath = global::Hyperborea.Services.S.DirectBgPathEntry;
+            if (directBgPath.HasPendingOverride)
+            {
+                var originalPath = CStringPointerToString(path);
+                var hookName = $"ResourceManager.GetResourceSync type={ReadResourceType(resourceType)} flags=0x{flags:X}";
+                if (directBgPath.TryGetResourceOverridePath(originalPath, hookName, out var overridePathPtr))
+                {
+                    return ResourceManagerGetResourceSyncHook!.Original(self, category, resourceType, resourceHash, (byte*)overridePathPtr, listener, unk, flags);
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            PluginLog.Warning($"[DirectBgPath] ResourceManager.GetResourceSync detour failed. {e.GetType().Name}: {e.Message}");
+        }
+
+        return ResourceManagerGetResourceSyncHook!.Original(self, category, resourceType, resourceHash, path, listener, unk, flags);
+    }
+
+    internal ResourceHandle* ResourceManagerGetResourceAsyncDetour(ResourceManager* self, ResourceCategory* category, uint* resourceType, uint* resourceHash, CStringPointer path, void* listener, bool unkBool, void* unk, uint flags)
+    {
+        try
+        {
+            var directBgPath = global::Hyperborea.Services.S.DirectBgPathEntry;
+            if (directBgPath.HasPendingOverride)
+            {
+                var originalPath = CStringPointerToString(path);
+                var hookName = $"ResourceManager.GetResourceAsync type={ReadResourceType(resourceType)} flags=0x{flags:X}";
+                if (directBgPath.TryGetResourceOverridePath(originalPath, hookName, out var overridePathPtr))
+                {
+                    return ResourceManagerGetResourceAsyncHook!.Original(self, category, resourceType, resourceHash, (byte*)overridePathPtr, listener, unkBool, unk, flags);
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            PluginLog.Warning($"[DirectBgPath] ResourceManager.GetResourceAsync detour failed. {e.GetType().Name}: {e.Message}");
+        }
+
+        return ResourceManagerGetResourceAsyncHook!.Original(self, category, resourceType, resourceHash, path, listener, unkBool, unk, flags);
     }
 
     static string CStringPointerToString(CStringPointer path)
@@ -296,6 +370,18 @@ public unsafe class Memory
         catch
         {
             return "";
+        }
+    }
+
+    static string ReadResourceType(uint* resourceType)
+    {
+        try
+        {
+            return resourceType == null ? "null" : $"0x{*resourceType:X8}";
+        }
+        catch
+        {
+            return "unreadable";
         }
     }
 }
