@@ -11,22 +11,37 @@ public unsafe sealed class DirectBgPathEntryService : IDisposable
 {
     static readonly TimeSpan CarrierChangeWarningTimeout = TimeSpan.FromSeconds(5);
     static readonly TimeSpan PendingTimeout = TimeSpan.FromSeconds(20);
-    static readonly string[] LayoutExtensions = [".lvb", ".lgb", ".sgb", ".pcb"];
-    static readonly string[] ProbeKeywords = ["/level/", ".lvb", ".lgb", ".sgb", "bg/", "manfst00510", "s1ti"];
+    static readonly TimeSpan AfterClearWatchWindow = TimeSpan.FromSeconds(10);
+    static readonly string[] MainLayoutExtensions = [".lvb", ".lgb", ".sgb", ".svb", ".lcb", ".pcb"];
+    static readonly string[] ProbeKeywords = ["/level/", ".lvb", ".lgb", ".sgb", ".svb", ".lcb", "bg/", "manfst00510", "s1ti"];
+    static readonly string[] LevelLgbFiles = ["bg.lgb", "vfx.lgb", "planmap.lgb", "planevent.lgb", "sound.lgb"];
 
     readonly object stateLock = new();
     readonly Dictionary<string, nint> replacementPathPtrs = new(StringComparer.OrdinalIgnoreCase);
+    readonly Dictionary<string, bool> targetResourceExists = new(StringComparer.OrdinalIgnoreCase);
+    readonly HashSet<string> uniqueProbedResources = new(StringComparer.OrdinalIgnoreCase);
+    readonly HashSet<string> loggedProbePaths = new(StringComparer.OrdinalIgnoreCase);
+    readonly HashSet<string> loggedOverridePaths = new(StringComparer.OrdinalIgnoreCase);
+    readonly HashSet<string> loggedLateOverridePaths = new(StringComparer.OrdinalIgnoreCase);
+    readonly HashSet<string> loggedMissingTargets = new(StringComparer.OrdinalIgnoreCase);
+    readonly HashSet<string> loggedAfterClearPaths = new(StringComparer.OrdinalIgnoreCase);
     nint targetPathPtr;
     int nextAttemptId;
     bool requestLogged;
-    bool hitLogged;
+    bool activeLogged;
     bool completionLogged;
     bool hookCalledLogged;
     bool hookMismatchLogged;
     bool carrierChangeWarningLogged;
     bool probeLimitLogged;
     bool overrideLimitLogged;
+    bool afterClearLimitLogged;
     int probeLogCount;
+    int overrideLogCount;
+    int afterClearLogCount;
+    DateTime? clearedAt;
+    string clearedCarrierBgPath = "";
+    string clearedTargetPath = "";
 
     public DirectBgPathState State { get; private set; } = DirectBgPathState.Idle;
     public int AttemptId { get; private set; }
@@ -38,7 +53,9 @@ public unsafe sealed class DirectBgPathEntryService : IDisposable
     public string LastOriginalBgPath { get; private set; } = "";
     public string LastReplacementPath { get; private set; } = "";
     public string LastResourceProbePath { get; private set; } = "";
+    public string LastSkipReason { get; private set; } = "";
     public string LastError { get; private set; } = "";
+    public string TargetResourceProbeSummary { get; private set; } = "";
     public DateTime? StartedAt { get; private set; }
     public DateTime? LastLogTime { get; private set; }
     public DateTime? CarrierEnterRequestedAt { get; private set; }
@@ -46,14 +63,19 @@ public unsafe sealed class DirectBgPathEntryService : IDisposable
     public uint TerritoryBefore { get; private set; }
     public uint LastObservedTerritory { get; private set; }
     public int OverrideHits { get; private set; }
-    public int ProbeLogCount { get; private set; }
+    public int ProbedResources { get; private set; }
+    public int UniqueProbedResources => uniqueProbedResources.Count;
+    public int SkippedBecauseTargetMissing { get; private set; }
+    public int SkippedBecauseNotLayout { get; private set; }
+    public int SkippedBecauseAfterClear { get; private set; }
     public bool HasCarrier => GetCarrierTerritoryId() != 0;
     public bool LoadPrefetchLayoutHookReady => P.Memory?.LoadPrefetchLayoutHook?.IsEnabled == true;
     public bool ResourceManagerSyncHookReady => P.Memory?.ResourceManagerGetResourceSyncHook?.IsEnabled == true;
     public bool ResourceManagerAsyncHookReady => P.Memory?.ResourceManagerGetResourceAsyncHook?.IsEnabled == true;
     public bool IsHookReady => LoadPrefetchLayoutHookReady || ResourceManagerSyncHookReady || ResourceManagerAsyncHookReady;
-    public bool IsBusy => State is DirectBgPathState.Requested or DirectBgPathState.EnteringCarrier or DirectBgPathState.WaitingForOverrideHook or DirectBgPathState.OverrideHit;
+    public bool IsBusy => State is DirectBgPathState.Requested or DirectBgPathState.EnteringCarrier or DirectBgPathState.WaitingForResourceOverride or DirectBgPathState.ActiveOverride;
     public bool HasPendingOverride => targetPathPtr != 0 && IsBusy;
+    public bool ShouldObserveAfterClear => clearedAt != null && DateTime.Now - clearedAt.Value <= AfterClearWatchWindow && !clearedCarrierBgPath.IsNullOrEmpty();
 
     public DirectBgPathEntryService()
     {
@@ -81,7 +103,7 @@ public unsafe sealed class DirectBgPathEntryService : IDisposable
         {
             if (IsBusy)
             {
-                LastError = "DirectBgPath attempt already pending; cancel or wait before trying again";
+                LastError = "DirectBgPath attempt already active; cancel or clear it before trying again";
                 TouchLog();
                 PluginLog.Warning($"{LogPrefix()} Button click ignored: state = {State}; target = {TargetPath}; carrier = {CarrierTerritoryId}; hits = {OverrideHits}");
                 return false;
@@ -109,7 +131,7 @@ public unsafe sealed class DirectBgPathEntryService : IDisposable
 
         if (IsBusy)
         {
-            Fail("DirectBgPath attempt already pending; cancel it before starting a new attempt");
+            Fail("DirectBgPath attempt already active; clear it before starting a new attempt");
             return false;
         }
 
@@ -157,7 +179,7 @@ public unsafe sealed class DirectBgPathEntryService : IDisposable
 
         lock (stateLock)
         {
-            State = DirectBgPathState.WaitingForOverrideHook;
+            State = DirectBgPathState.WaitingForResourceOverride;
             TouchLog();
             PluginLog.Information($"{LogPrefix()} Carrier zone requested; waiting for ResourceManager/LoadPrefetchLayout override hit. target = {TargetPath}; carrierTerritory = {CarrierTerritoryId}; carrierBg = {CarrierBgPath}");
             return true;
@@ -207,7 +229,7 @@ public unsafe sealed class DirectBgPathEntryService : IDisposable
     {
         lock (stateLock)
         {
-            if (State is not (DirectBgPathState.WaitingForOverrideHook or DirectBgPathState.OverrideHit) || StartedAt == null) return;
+            if (State is not (DirectBgPathState.WaitingForResourceOverride or DirectBgPathState.ActiveOverride) || StartedAt == null) return;
             var elapsed = DateTime.Now - StartedAt.Value;
 
             if (!carrierChangeWarningLogged && CarrierObservedAt == null && CarrierEnterRequestedAt != null && DateTime.Now - CarrierEnterRequestedAt.Value >= CarrierChangeWarningTimeout)
@@ -218,18 +240,23 @@ public unsafe sealed class DirectBgPathEntryService : IDisposable
                 PluginLog.Warning($"{LogPrefix()} Carrier territory did not change within timeout: before = {TerritoryBefore}; requested = {CarrierTerritoryId}; current = {Svc.ClientState.TerritoryType}");
             }
 
-            if (elapsed < PendingTimeout) return;
-
-            if (OverrideHits > 0)
+            if (State == DirectBgPathState.ActiveOverride)
             {
-                Complete("override window completed");
+                if (C.DirectBgPathHoldUntilManualClear) return;
+                if (elapsed < PendingTimeout) return;
+                State = DirectBgPathState.Stable;
+                LogCompletionOnce("timed active override window completed");
+                FreeTargetPath();
+                FreeReplacementPaths();
                 return;
             }
+
+            if (elapsed < PendingTimeout) return;
 
             State = DirectBgPathState.TimedOut;
             LastError = CarrierObservedAt == null
                 ? "carrier territory did not change before DirectBgPath timeout"
-                : "carrier loaded but bg override hook did not fire";
+                : "carrier loaded but no bg resource override hit";
             TouchLog();
 
             if (CarrierObservedAt == null)
@@ -260,6 +287,12 @@ public unsafe sealed class DirectBgPathEntryService : IDisposable
             {
                 CarrierObservedAt = DateTime.Now;
                 LastError = "";
+                return;
+            }
+
+            if (CarrierObservedAt != null && State == DirectBgPathState.ActiveOverride)
+            {
+                ClearLocked($"territory changed away from carrier: old={oldTerritory}; new={newTerritory}");
             }
         }
     }
@@ -270,6 +303,10 @@ public unsafe sealed class DirectBgPathEntryService : IDisposable
         {
             FreeTargetPath();
             FreeReplacementPaths();
+            ResetAttemptCounters();
+            clearedAt = null;
+            clearedCarrierBgPath = "";
+            clearedTargetPath = "";
             TargetPath = NormalizeForLoad(targetPath);
             NormalizedTargetPath = BgPathResolver.NormalizePath(TargetPath);
             SourceName = sourceName;
@@ -278,6 +315,7 @@ public unsafe sealed class DirectBgPathEntryService : IDisposable
             LastOriginalBgPath = "";
             LastReplacementPath = "";
             LastResourceProbePath = "";
+            LastSkipReason = "";
             LastError = "";
             StartedAt = DateTime.Now;
             CarrierEnterRequestedAt = StartedAt;
@@ -285,19 +323,18 @@ public unsafe sealed class DirectBgPathEntryService : IDisposable
             TerritoryBefore = Svc.ClientState.TerritoryType;
             LastObservedTerritory = TerritoryBefore;
             if (TerritoryBefore == CarrierTerritoryId) CarrierObservedAt = StartedAt;
-            OverrideHits = 0;
-            ProbeLogCount = 0;
-            probeLogCount = 0;
             State = DirectBgPathState.Requested;
             requestLogged = false;
-            hitLogged = false;
+            activeLogged = false;
             completionLogged = false;
             hookCalledLogged = false;
             hookMismatchLogged = false;
             carrierChangeWarningLogged = false;
             probeLimitLogged = false;
             overrideLimitLogged = false;
+            afterClearLimitLogged = false;
             targetPathPtr = AllocUtf8(TargetPath);
+            ProbeTargetResourcesLocked();
             LogRequestOnce();
             PluginLog.Information($"{LogPrefix()} Territory before = {TerritoryBefore}");
             PluginLog.Information($"{LogPrefix()} Carrier requested = {CarrierTerritoryId}");
@@ -320,13 +357,8 @@ public unsafe sealed class DirectBgPathEntryService : IDisposable
                 return false;
             }
 
-            OverrideHits++;
-            LastOriginalBgPath = originalPath;
-            LastReplacementPath = TargetPath;
-            State = DirectBgPathState.OverrideHit;
-            LastError = "";
             overridePathPtr = targetPathPtr;
-            LogOverrideHit("LoadPrefetchLayout", originalPath, TargetPath);
+            RecordOverrideHit("LoadPrefetchLayout", originalPath, TargetPath);
             return true;
         }
     }
@@ -339,19 +371,38 @@ public unsafe sealed class DirectBgPathEntryService : IDisposable
             if (!HasPendingOverride || originalPath.IsNullOrEmpty()) return false;
             LogProbeIfNeeded(originalPath, hookName);
 
-            if (!TryBuildResourceReplacementPath(originalPath, out var replacementPath))
+            if (!TryBuildResourceReplacementPath(originalPath, out var replacementPath, out var skipReason))
             {
+                CountSkip(skipReason, originalPath);
                 return false;
             }
 
             overridePathPtr = GetOrAllocateReplacementPath(replacementPath);
-            OverrideHits++;
-            LastOriginalBgPath = originalPath;
-            LastReplacementPath = replacementPath;
-            LastError = "";
-            State = DirectBgPathState.OverrideHit;
-            LogOverrideHit(hookName, originalPath, replacementPath);
+            RecordOverrideHit(hookName, originalPath, replacementPath);
             return true;
+        }
+    }
+
+    public void ObserveResourceAfterClear(string originalPath, string hookName)
+    {
+        lock (stateLock)
+        {
+            if (!ShouldObserveAfterClear || originalPath.IsNullOrEmpty()) return;
+            if (!IsClearedCarrierResource(originalPath)) return;
+            SkippedBecauseAfterClear++;
+            LastSkipReason = "after clear";
+            if (!loggedAfterClearPaths.Add(BgPathResolver.NormalizeBasicPath(originalPath))) return;
+            if (afterClearLogCount++ < 10)
+            {
+                TouchLog();
+                PluginLog.Warning($"{LogPrefix()} Carrier resource requested after clear: path = {originalPath}; type = {hookName}");
+                PluginLog.Warning($"{LogPrefix()} WARNING: carrier resource requested after override completed; this may cause visual revert");
+            }
+            else if (!afterClearLimitLogged)
+            {
+                afterClearLimitLogged = true;
+                PluginLog.Warning($"{LogPrefix()} Carrier resource after-clear log limit reached.");
+            }
         }
     }
 
@@ -359,41 +410,46 @@ public unsafe sealed class DirectBgPathEntryService : IDisposable
     {
         lock (stateLock)
         {
-            if (State is DirectBgPathState.Requested or DirectBgPathState.EnteringCarrier or DirectBgPathState.WaitingForOverrideHook or DirectBgPathState.OverrideHit or DirectBgPathState.Completed or DirectBgPathState.TimedOut)
-            {
-                PluginLog.Information($"{LogPrefix()} Cleared: reason = {reason}; target = {TargetPath}; hits = {OverrideHits}");
-            }
-            FreeTargetPath();
-            FreeReplacementPaths();
-            State = DirectBgPathState.Idle;
-            AttemptId = 0;
-            TargetPath = "";
-            NormalizedTargetPath = "";
-            SourceName = "";
-            CarrierTerritoryId = 0;
-            CarrierBgPath = "";
-            LastOriginalBgPath = "";
-            LastReplacementPath = "";
-            LastResourceProbePath = "";
-            LastError = "";
-            StartedAt = null;
-            CarrierEnterRequestedAt = null;
-            CarrierObservedAt = null;
-            TerritoryBefore = 0;
-            LastObservedTerritory = 0;
-            OverrideHits = 0;
-            ProbeLogCount = 0;
-            probeLogCount = 0;
-            requestLogged = false;
-            hitLogged = false;
-            completionLogged = false;
-            hookCalledLogged = false;
-            hookMismatchLogged = false;
-            carrierChangeWarningLogged = false;
-            probeLimitLogged = false;
-            overrideLimitLogged = false;
-            TouchLog();
+            ClearLocked(reason);
         }
+    }
+
+    void ClearLocked(string reason)
+    {
+        if (State is DirectBgPathState.Requested or DirectBgPathState.EnteringCarrier or DirectBgPathState.WaitingForResourceOverride or DirectBgPathState.ActiveOverride or DirectBgPathState.Stable or DirectBgPathState.TimedOut)
+        {
+            PluginLog.Information($"{LogPrefix()} DirectBgPath cleared: reason = {reason}; target = {TargetPath}; hits = {OverrideHits}; lastOriginal = {LastOriginalBgPath}; lastReplacement = {LastReplacementPath}");
+        }
+
+        clearedAt = DateTime.Now;
+        clearedCarrierBgPath = CarrierBgPath;
+        clearedTargetPath = TargetPath;
+        FreeTargetPath();
+        FreeReplacementPaths();
+        State = reason.Contains("user", StringComparison.OrdinalIgnoreCase) || reason.Contains("manual", StringComparison.OrdinalIgnoreCase)
+            ? DirectBgPathState.UserCancelled
+            : DirectBgPathState.Cleared;
+        TargetPath = "";
+        NormalizedTargetPath = "";
+        SourceName = "";
+        CarrierTerritoryId = 0;
+        CarrierBgPath = "";
+        LastOriginalBgPath = "";
+        LastReplacementPath = "";
+        LastResourceProbePath = "";
+        LastError = "";
+        StartedAt = null;
+        CarrierEnterRequestedAt = null;
+        CarrierObservedAt = null;
+        TerritoryBefore = 0;
+        LastObservedTerritory = 0;
+        requestLogged = false;
+        activeLogged = false;
+        completionLogged = false;
+        hookCalledLogged = false;
+        hookMismatchLogged = false;
+        carrierChangeWarningLogged = false;
+        TouchLog();
     }
 
     public void Fail(string reason)
@@ -452,6 +508,7 @@ public unsafe sealed class DirectBgPathEntryService : IDisposable
             $"resourceManagerGetResourceAsyncHookInstalled = {ResourceManagerAsyncHookReady}\n" +
             $"hookName = ResourceManager.GetResourceSync/GetResourceAsync + LoadPrefetchLayout\n" +
             $"resourceProbeEnabled = {C.DirectBgPathResourceProbe}\n" +
+            $"holdUntilManualClear = {C.DirectBgPathHoldUntilManualClear}\n" +
             $"carrierTerritory = {carrier}\n" +
             $"carrierExists = {carrierExists}\n" +
             $"carrierBg = {carrierBg}\n" +
@@ -464,9 +521,16 @@ public unsafe sealed class DirectBgPathEntryService : IDisposable
             $"territoryBefore = {TerritoryBefore}\n" +
             $"lastObservedTerritory = {LastObservedTerritory}\n" +
             $"overrideHits = {OverrideHits}\n" +
+            $"probedResources = {ProbedResources}\n" +
+            $"uniqueProbedResources = {UniqueProbedResources}\n" +
+            $"skippedBecauseTargetMissing = {SkippedBecauseTargetMissing}\n" +
+            $"skippedBecauseNotLayout = {SkippedBecauseNotLayout}\n" +
+            $"skippedBecauseAfterClear = {SkippedBecauseAfterClear}\n" +
+            $"targetResourceProbe = {TargetResourceProbeSummary}\n" +
             $"lastOriginalPath = {LastOriginalBgPath}\n" +
             $"lastReplacementPath = {LastReplacementPath}\n" +
             $"lastProbePath = {LastResourceProbePath}\n" +
+            $"lastSkipReason = {LastSkipReason}\n" +
             $"lastError = {(LastError.IsNullOrEmpty() ? "none" : LastError)}\n" +
             $"canCallNormalEnter = {Utils.CanUse()}\n" +
             $"includeCutsceneCacheReady = {snapshot?.IncludeCutsceneTerritories == true}\n" +
@@ -491,6 +555,31 @@ public unsafe sealed class DirectBgPathEntryService : IDisposable
         }
     }
 
+    void RecordOverrideHit(string hookName, string originalPath, string replacementPath)
+    {
+        OverrideHits++;
+        LastOriginalBgPath = originalPath;
+        LastReplacementPath = replacementPath;
+        LastError = "";
+        StartActiveOverrideIfNeeded();
+        LogOverrideHit(hookName, originalPath, replacementPath);
+        LogLateOverrideIfNeeded(originalPath);
+    }
+
+    void StartActiveOverrideIfNeeded()
+    {
+        if (State == DirectBgPathState.ActiveOverride) return;
+        State = DirectBgPathState.ActiveOverride;
+        if (activeLogged) return;
+        activeLogged = true;
+        TouchLog();
+        PluginLog.Information($"{LogPrefix()} Active override session started");
+        if (C.DirectBgPathHoldUntilManualClear)
+        {
+            PluginLog.Information($"{LogPrefix()} Keeping override active until manual clear");
+        }
+    }
+
     void LogRequestOnce()
     {
         if (requestLogged) return;
@@ -505,14 +594,6 @@ public unsafe sealed class DirectBgPathEntryService : IDisposable
         completionLogged = true;
         TouchLog();
         PluginLog.Information($"{LogPrefix()} Completed: reason = {reason}; target = {TargetPath}; carrierTerritory = {CarrierTerritoryId}; hits = {OverrideHits}; lastOriginal = {LastOriginalBgPath}; lastReplacement = {LastReplacementPath}");
-    }
-
-    void Complete(string reason)
-    {
-        State = DirectBgPathState.Completed;
-        LogCompletionOnce(reason);
-        FreeTargetPath();
-        FreeReplacementPaths();
     }
 
     void SetState(DirectBgPathState state)
@@ -542,60 +623,248 @@ public unsafe sealed class DirectBgPathEntryService : IDisposable
 
     void LogOverrideHit(string hookName, string originalPath, string replacementPath)
     {
-        if (!hitLogged)
+        var key = $"{BgPathResolver.NormalizeBasicPath(originalPath)}->{BgPathResolver.NormalizeBasicPath(replacementPath)}";
+        if (loggedOverridePaths.Add(key) && overrideLogCount < 30)
         {
-            hitLogged = true;
+            overrideLogCount++;
+            TouchLog();
+            PluginLog.Information($"{LogPrefix()} Resource override hit: original = {originalPath}; replacement = {replacementPath}; type = {hookName}; overrideHits = {OverrideHits}");
+            return;
         }
 
-        TouchLog();
-        if (OverrideHits <= 20)
-        {
-            PluginLog.Information($"{LogPrefix()} Resource override hit: original = {originalPath}; replacement = {replacementPath}; type = {hookName}; overrideHits = {OverrideHits}");
-        }
-        else if (!overrideLimitLogged)
+        if (!overrideLimitLogged && overrideLogCount >= 30)
         {
             overrideLimitLogged = true;
             PluginLog.Information($"{LogPrefix()} Resource override hit log limit reached; further override hits will update counters only.");
         }
     }
 
+    void LogLateOverrideIfNeeded(string originalPath)
+    {
+        if (State != DirectBgPathState.ActiveOverride || OverrideHits <= 4) return;
+        var key = BgPathResolver.NormalizeBasicPath(originalPath);
+        if (!loggedLateOverridePaths.Add(key) || loggedLateOverridePaths.Count > 10) return;
+        TouchLog();
+        PluginLog.Information($"{LogPrefix()} Late carrier resource request overridden: path = {originalPath}; hits = {OverrideHits}");
+    }
+
     void LogProbeIfNeeded(string originalPath, string hookName)
     {
         if (!C.DirectBgPathResourceProbe) return;
         if (!LooksInterestingForProbe(originalPath)) return;
+        ProbedResources++;
+        var normalized = BgPathResolver.NormalizeBasicPath(originalPath);
+        uniqueProbedResources.Add(normalized);
         LastResourceProbePath = originalPath;
-        if (probeLogCount < 50)
+        if (loggedProbePaths.Add(normalized) && probeLogCount < 100)
         {
             probeLogCount++;
-            ProbeLogCount = probeLogCount;
             TouchLog();
-            var canOverride = TryBuildResourceReplacementPath(originalPath, out var replacementPath);
-            PluginLog.Information($"{LogPrefix()}[Probe] Resource requested: path = {originalPath}; type = {hookName}; canOverride = {canOverride}; replacement = {replacementPath}");
+            var canOverride = TryBuildResourceReplacementPath(originalPath, out var replacementPath, out var skipReason);
+            PluginLog.Information($"{LogPrefix()}[Probe] Resource requested: path = {originalPath}; type = {hookName}; canOverride = {canOverride}; replacement = {replacementPath}; skipReason = {skipReason}");
             return;
         }
 
-        ProbeLogCount = probeLogCount;
-        if (!probeLimitLogged)
+        if (!probeLimitLogged && probeLogCount >= 100)
         {
             probeLimitLogged = true;
             TouchLog();
-            PluginLog.Information($"{LogPrefix()}[Probe] Resource probe log limit reached; further matching requests will update lastProbePath only.");
+            PluginLog.Information($"{LogPrefix()}[Probe] Resource probe log limit reached; further matching requests will update counters only.");
         }
     }
 
-    bool TryBuildResourceReplacementPath(string originalPath, out string replacementPath)
+    bool TryBuildResourceReplacementPath(string originalPath, out string replacementPath, out DirectBgPathSkipReason skipReason)
     {
         replacementPath = "";
-        if (TargetPath.IsNullOrEmpty() || CarrierBgPath.IsNullOrEmpty()) return false;
+        skipReason = DirectBgPathSkipReason.None;
+        if (TargetPath.IsNullOrEmpty() || CarrierBgPath.IsNullOrEmpty())
+        {
+            skipReason = DirectBgPathSkipReason.NotCarrierFamily;
+            return false;
+        }
 
         var originalBasic = BgPathResolver.NormalizeBasicPath(originalPath);
         var originalBase = StripBgPrefixAndExtension(originalBasic, out var hadBgPrefix, out var extension);
         var carrierBase = NormalizeForLoad(CarrierBgPath);
-        if (!IsLayoutResourceCandidate(originalBasic, extension)) return false;
-        if (!TryGetCarrierRelativeSuffix(originalBase, carrierBase, out var suffix)) return false;
+        var carrierRoot = GetSceneRoot(carrierBase);
+        var carrierLevelRoot = $"{carrierRoot}/level";
 
-        replacementPath = $"{(hadBgPrefix ? "bg/" : "")}{TargetPath}{suffix}{extension}";
-        return true;
+        if (!IsCarrierFamilyPath(originalBase, carrierBase, carrierRoot, carrierLevelRoot))
+        {
+            skipReason = DirectBgPathSkipReason.NotCarrierFamily;
+            return false;
+        }
+
+        if (!IsMainLayoutResource(originalBase, extension, carrierBase, carrierLevelRoot))
+        {
+            skipReason = DirectBgPathSkipReason.NotLayout;
+            return false;
+        }
+
+        var candidates = BuildReplacementCandidates(originalBase, extension, carrierBase, carrierLevelRoot);
+        foreach (var candidate in candidates)
+        {
+            if (!TargetResourceExists(candidate)) continue;
+            replacementPath = $"{(hadBgPrefix ? "bg/" : "")}{candidate}";
+            return true;
+        }
+
+        skipReason = DirectBgPathSkipReason.TargetMissing;
+        LogMissingTargetOnce(originalPath, candidates);
+        return false;
+    }
+
+    IEnumerable<string> BuildReplacementCandidates(string originalBase, string extension, string carrierBase, string carrierLevelRoot)
+    {
+        var targetRoot = GetSceneRoot(TargetPath);
+        var targetName = GetLastSegment(TargetPath);
+        if (originalBase.Equals(carrierBase, StringComparison.OrdinalIgnoreCase))
+        {
+            foreach (var candidate in BuildBaseReplacementCandidates(extension, targetRoot, targetName))
+            {
+                yield return candidate;
+            }
+            yield break;
+        }
+
+        if (originalBase.StartsWith($"{carrierLevelRoot}/", StringComparison.OrdinalIgnoreCase) && extension.Equals(".lgb", StringComparison.OrdinalIgnoreCase))
+        {
+            var levelFileName = $"{GetLastSegment(originalBase)}{extension}";
+            foreach (var candidate in BuildLevelLgbReplacementCandidates(levelFileName, targetRoot))
+            {
+                yield return candidate;
+            }
+        }
+    }
+
+    IEnumerable<string> BuildBaseReplacementCandidates(string extension, string targetRoot, string targetName)
+    {
+        if (extension.Equals(".lvb", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return $"{TargetPath}.lvb";
+            yield return $"{TargetPath}.sgb";
+            yield return $"{targetRoot}/level/{targetName}.lvb";
+            yield return $"{targetRoot}/level/bg.lgb";
+            yield break;
+        }
+
+        if (extension.Equals(".sgb", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return $"{TargetPath}.sgb";
+            yield return $"{TargetPath}.lvb";
+            yield return $"{targetRoot}/level/{targetName}.sgb";
+            yield return $"{targetRoot}/level/bg.lgb";
+            yield break;
+        }
+
+        if (extension.Equals(".lgb", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return $"{TargetPath}.lgb";
+            yield return $"{targetRoot}/level/bg.lgb";
+            yield return $"{targetRoot}/bg.lgb";
+            yield return $"{TargetPath}.sgb";
+            yield break;
+        }
+
+        yield return $"{TargetPath}{extension}";
+        yield return $"{targetRoot}/level/{targetName}{extension}";
+    }
+
+    IEnumerable<string> BuildLevelLgbReplacementCandidates(string levelFileName, string targetRoot)
+    {
+        yield return $"{targetRoot}/level/{levelFileName}";
+        yield return $"{targetRoot}/{levelFileName}";
+        if (levelFileName.Equals("bg.lgb", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return $"{TargetPath}.lgb";
+            yield return $"{TargetPath}.sgb";
+        }
+    }
+
+    bool TargetResourceExists(string noBgPath)
+    {
+        var fullPath = WithBgPrefix(noBgPath);
+        if (targetResourceExists.TryGetValue(fullPath, out var exists)) return exists;
+        exists = SafeFileExists(fullPath);
+        targetResourceExists[fullPath] = exists;
+        return exists;
+    }
+
+    void ProbeTargetResourcesLocked()
+    {
+        targetResourceExists.Clear();
+        var candidates = BuildTargetProbeCandidates(TargetPath).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var lines = new StringBuilder();
+        var found = 0;
+        foreach (var candidate in candidates)
+        {
+            var fullPath = WithBgPrefix(candidate);
+            var exists = SafeFileExists(fullPath);
+            targetResourceExists[fullPath] = exists;
+            if (exists) found++;
+            lines.AppendLine($"exists {fullPath} = {exists}");
+        }
+
+        TargetResourceProbeSummary = $"{found}/{candidates.Length} target resource candidates exist";
+        PluginLog.Information($"{LogPrefix()} Target resource probe:\n{lines.ToString().TrimEnd()}");
+    }
+
+    IEnumerable<string> BuildTargetProbeCandidates(string targetPath)
+    {
+        var targetRoot = GetSceneRoot(targetPath);
+        var targetName = GetLastSegment(targetPath);
+        foreach (var extension in new[] { ".lvb", ".sgb", ".svb", ".lcb", ".lgb" })
+        {
+            yield return $"{targetPath}{extension}";
+        }
+
+        yield return $"{targetRoot}/level/{targetName}.lvb";
+        yield return $"{targetRoot}/level/{targetName}.sgb";
+        foreach (var fileName in LevelLgbFiles)
+        {
+            yield return $"{targetRoot}/level/{fileName}";
+        }
+
+        foreach (var fileName in LevelLgbFiles)
+        {
+            yield return $"{targetRoot}/{fileName}";
+        }
+    }
+
+    bool SafeFileExists(string path)
+    {
+        try
+        {
+            return Svc.Data.FileExists(path);
+        }
+        catch (Exception e)
+        {
+            PluginLog.Warning($"{LogPrefix()} Target resource FileExists failed: path = {path}; {e.GetType().Name}: {e.Message}");
+            return false;
+        }
+    }
+
+    void CountSkip(DirectBgPathSkipReason skipReason, string originalPath)
+    {
+        if (skipReason is DirectBgPathSkipReason.None or DirectBgPathSkipReason.NotCarrierFamily) return;
+        LastSkipReason = $"{skipReason}: {originalPath}";
+        switch (skipReason)
+        {
+            case DirectBgPathSkipReason.TargetMissing:
+                SkippedBecauseTargetMissing++;
+                break;
+            case DirectBgPathSkipReason.NotLayout:
+                SkippedBecauseNotLayout++;
+                break;
+        }
+    }
+
+    void LogMissingTargetOnce(string originalPath, IEnumerable<string> candidates)
+    {
+        var key = BgPathResolver.NormalizeBasicPath(originalPath);
+        if (!loggedMissingTargets.Add(key)) return;
+        TouchLog();
+        PluginLog.Warning($"{LogPrefix()} Resource override skipped because target resource is missing: original = {originalPath}; candidates = {string.Join(", ", candidates.Select(WithBgPrefix))}");
     }
 
     bool LooksInterestingForProbe(string originalPath)
@@ -609,24 +878,27 @@ public unsafe sealed class DirectBgPathEntryService : IDisposable
         return ProbeKeywords.Any(x => originalBasic.Contains(x, StringComparison.OrdinalIgnoreCase));
     }
 
-    static bool IsLayoutResourceCandidate(string originalBasic, string extension)
+    bool IsClearedCarrierResource(string originalPath)
     {
-        if (LayoutExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase)) return true;
-        return extension.IsNullOrEmpty() && originalBasic.Contains("/level/", StringComparison.OrdinalIgnoreCase);
+        var originalBase = StripBgPrefixAndExtension(BgPathResolver.NormalizeBasicPath(originalPath), out _, out _);
+        var carrierBase = NormalizeForLoad(clearedCarrierBgPath);
+        var carrierRoot = GetSceneRoot(carrierBase);
+        return IsCarrierFamilyPath(originalBase, carrierBase, carrierRoot, $"{carrierRoot}/level");
     }
 
-    static bool TryGetCarrierRelativeSuffix(string originalBase, string carrierBase, out string suffix)
+    static bool IsCarrierFamilyPath(string originalBase, string carrierBase, string carrierRoot, string carrierLevelRoot)
     {
-        suffix = "";
-        if (originalBase.IsNullOrEmpty() || carrierBase.IsNullOrEmpty()) return false;
-        if (originalBase.Equals(carrierBase, StringComparison.OrdinalIgnoreCase)) return true;
-        if (originalBase.StartsWith(carrierBase, StringComparison.OrdinalIgnoreCase))
-        {
-            suffix = originalBase[carrierBase.Length..];
-            return true;
-        }
-        if (originalBase.Contains(carrierBase, StringComparison.OrdinalIgnoreCase)) return true;
-        return carrierBase.Contains(originalBase, StringComparison.OrdinalIgnoreCase);
+        return originalBase.Equals(carrierBase, StringComparison.OrdinalIgnoreCase)
+            || originalBase.StartsWith($"{carrierLevelRoot}/", StringComparison.OrdinalIgnoreCase)
+            || originalBase.StartsWith($"{carrierRoot}/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    static bool IsMainLayoutResource(string originalBase, string extension, string carrierBase, string carrierLevelRoot)
+    {
+        if (originalBase.Equals(carrierBase, StringComparison.OrdinalIgnoreCase) && MainLayoutExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase)) return true;
+        if (!originalBase.StartsWith($"{carrierLevelRoot}/", StringComparison.OrdinalIgnoreCase) || !extension.Equals(".lgb", StringComparison.OrdinalIgnoreCase)) return false;
+        var fileName = $"{GetLastSegment(originalBase)}{extension}";
+        return LevelLgbFiles.Contains(fileName, StringComparer.OrdinalIgnoreCase);
     }
 
     static string StripBgPrefixAndExtension(string path, out bool hadBgPrefix, out string extension)
@@ -635,7 +907,7 @@ public unsafe sealed class DirectBgPathEntryService : IDisposable
         hadBgPrefix = ret.StartsWith("bg/", StringComparison.OrdinalIgnoreCase);
         if (hadBgPrefix) ret = ret[3..];
         extension = "";
-        foreach (var candidate in LayoutExtensions)
+        foreach (var candidate in MainLayoutExtensions)
         {
             if (!ret.EndsWith(candidate, StringComparison.OrdinalIgnoreCase)) continue;
             extension = candidate;
@@ -643,6 +915,28 @@ public unsafe sealed class DirectBgPathEntryService : IDisposable
             break;
         }
         return ret.Trim('/');
+    }
+
+    static string GetSceneRoot(string path)
+    {
+        var normalized = NormalizeForLoad(path);
+        var levelIndex = normalized.IndexOf("/level/", StringComparison.OrdinalIgnoreCase);
+        if (levelIndex >= 0) return normalized[..levelIndex].Trim('/');
+        var lastSlash = normalized.LastIndexOf('/');
+        return lastSlash <= 0 ? normalized : normalized[..lastSlash];
+    }
+
+    static string GetLastSegment(string path)
+    {
+        var normalized = NormalizeForLoad(path);
+        var lastSlash = normalized.LastIndexOf('/');
+        return lastSlash < 0 ? normalized : normalized[(lastSlash + 1)..];
+    }
+
+    static string WithBgPrefix(string noBgPath)
+    {
+        var normalized = BgPathResolver.NormalizeBasicPath(noBgPath);
+        return normalized.StartsWith("bg/", StringComparison.OrdinalIgnoreCase) ? normalized : $"bg/{normalized}";
     }
 
     nint GetOrAllocateReplacementPath(string replacementPath)
@@ -653,6 +947,26 @@ public unsafe sealed class DirectBgPathEntryService : IDisposable
         return ptr;
     }
 
+    void ResetAttemptCounters()
+    {
+        OverrideHits = 0;
+        ProbedResources = 0;
+        SkippedBecauseTargetMissing = 0;
+        SkippedBecauseNotLayout = 0;
+        SkippedBecauseAfterClear = 0;
+        probeLogCount = 0;
+        overrideLogCount = 0;
+        afterClearLogCount = 0;
+        uniqueProbedResources.Clear();
+        loggedProbePaths.Clear();
+        loggedOverridePaths.Clear();
+        loggedLateOverridePaths.Clear();
+        loggedMissingTargets.Clear();
+        loggedAfterClearPaths.Clear();
+        targetResourceExists.Clear();
+        TargetResourceProbeSummary = "";
+    }
+
     string LogPrefix() => AttemptId == 0 ? "[DirectBgPath]" : $"[DirectBgPath#{AttemptId}]";
 
     void TouchLog() => LastLogTime = DateTime.Now;
@@ -661,7 +975,7 @@ public unsafe sealed class DirectBgPathEntryService : IDisposable
     {
         var ret = BgPathResolver.NormalizeBasicPath(path);
         if (ret.StartsWith("bg/", StringComparison.Ordinal)) ret = ret[3..];
-        foreach (var extension in new[] { ".lvb", ".lgb", ".sgb", ".pcb" })
+        foreach (var extension in MainLayoutExtensions)
         {
             if (ret.EndsWith(extension, StringComparison.Ordinal))
             {
@@ -705,9 +1019,19 @@ public enum DirectBgPathState
     ButtonClicked,
     Requested,
     EnteringCarrier,
-    WaitingForOverrideHook,
-    OverrideHit,
-    Completed,
+    WaitingForResourceOverride,
+    ActiveOverride,
+    Stable,
     Failed,
     TimedOut,
+    UserCancelled,
+    Cleared,
+}
+
+public enum DirectBgPathSkipReason
+{
+    None,
+    NotCarrierFamily,
+    NotLayout,
+    TargetMissing,
 }

@@ -625,6 +625,16 @@ public unsafe static class UI
         {
             ImGuiEx.TextWrapped($"Last probe: {service.LastResourceProbePath}");
         }
+        ImGuiEx.Text($"Resource counters: probed {service.ProbedResources}  unique {service.UniqueProbedResources}  hits {service.OverrideHits}");
+        ImGuiEx.Text($"Skipped: missing target {service.SkippedBecauseTargetMissing}  non-layout {service.SkippedBecauseNotLayout}  after clear {service.SkippedBecauseAfterClear}");
+        if (!service.TargetResourceProbeSummary.IsNullOrEmpty())
+        {
+            ImGuiEx.TextWrapped($"Target probe: {service.TargetResourceProbeSummary}");
+        }
+        if (!service.LastSkipReason.IsNullOrEmpty())
+        {
+            ImGuiEx.TextWrapped($"Last skip: {service.LastSkipReason}");
+        }
         if (service.TerritoryBefore != 0 || service.LastObservedTerritory != 0)
         {
             ImGuiEx.Text($"Territory: before {service.TerritoryBefore}  last {service.LastObservedTerritory}");
@@ -645,11 +655,19 @@ public unsafe static class UI
         {
             ImGuiEx.TextWrapped(EColor.YellowBright, "DirectBgPath 正在尝试进入，请等待或点击取消。");
         }
-        if (service.State is DirectBgPathState.Requested or DirectBgPathState.EnteringCarrier or DirectBgPathState.WaitingForOverrideHook or DirectBgPathState.OverrideHit or DirectBgPathState.Completed)
+        if (service.State is DirectBgPathState.Requested or DirectBgPathState.EnteringCarrier or DirectBgPathState.WaitingForResourceOverride or DirectBgPathState.ActiveOverride or DirectBgPathState.Stable or DirectBgPathState.TimedOut)
         {
             if (ImGui.Button(service.IsBusy ? "取消 DirectBgPath" : "清除 DirectBgPath Override"))
             {
                 service.Clear("user cleared override");
+            }
+            if (SavedZoneState != null)
+            {
+                ImGui.SameLine();
+                if (ImGui.Button("Return to saved normal territory"))
+                {
+                    Utils.Revert();
+                }
             }
         }
     }
@@ -687,6 +705,12 @@ public unsafe static class UI
         if (ImGui.Checkbox("DirectBgPath Resource Probe", ref probe))
         {
             C.DirectBgPathResourceProbe = probe;
+            EzConfig.Save();
+        }
+        var holdUntilManualClear = C.DirectBgPathHoldUntilManualClear;
+        if (ImGui.Checkbox("Keep DirectBgPath override until manual clear", ref holdUntilManualClear))
+        {
+            C.DirectBgPathHoldUntilManualClear = holdUntilManualClear;
             EzConfig.Save();
         }
 

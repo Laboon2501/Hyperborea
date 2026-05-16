@@ -7,6 +7,7 @@ public class Config : IEzConfig
     public bool IncludeCutsceneEventTerritories = false;
     public uint DirectBgPathCarrierTerritoryId = 0;
     public bool DirectBgPathResourceProbe = false;
+    public bool DirectBgPathHoldUntilManualClear = true;
     public uint CurrentMount = 0;
     public bool FastTeleport = false;
     public float NoclipSpeed = 0.05f;

@@ -298,13 +298,17 @@ public unsafe class Memory
         try
         {
             var directBgPath = global::Hyperborea.Services.S.DirectBgPathEntry;
-            if (directBgPath.HasPendingOverride)
+            if (directBgPath.HasPendingOverride || directBgPath.ShouldObserveAfterClear)
             {
                 var originalPath = CStringPointerToString(path);
-                if (directBgPath.TryGetOverridePath(originalPath, out var overridePathPtr))
+                if (directBgPath.HasPendingOverride && directBgPath.TryGetOverridePath(originalPath, out var overridePathPtr))
                 {
                     LoadPrefetchLayoutHook!.Original(self, a2, (byte*)overridePathPtr, a4, a5, a6, festivals, a8);
                     return;
+                }
+                if (directBgPath.ShouldObserveAfterClear)
+                {
+                    directBgPath.ObserveResourceAfterClear(originalPath, "LoadPrefetchLayout");
                 }
             }
         }
@@ -320,13 +324,17 @@ public unsafe class Memory
         try
         {
             var directBgPath = global::Hyperborea.Services.S.DirectBgPathEntry;
-            if (directBgPath.HasPendingOverride)
+            if (directBgPath.HasPendingOverride || directBgPath.ShouldObserveAfterClear)
             {
                 var originalPath = CStringPointerToString(path);
                 var hookName = $"ResourceManager.GetResourceSync type={ReadResourceType(resourceType)} flags=0x{flags:X}";
-                if (directBgPath.TryGetResourceOverridePath(originalPath, hookName, out var overridePathPtr))
+                if (directBgPath.HasPendingOverride && directBgPath.TryGetResourceOverridePath(originalPath, hookName, out var overridePathPtr))
                 {
                     return ResourceManagerGetResourceSyncHook!.Original(self, category, resourceType, resourceHash, (byte*)overridePathPtr, listener, unk, flags);
+                }
+                if (directBgPath.ShouldObserveAfterClear)
+                {
+                    directBgPath.ObserveResourceAfterClear(originalPath, hookName);
                 }
             }
         }
@@ -343,13 +351,17 @@ public unsafe class Memory
         try
         {
             var directBgPath = global::Hyperborea.Services.S.DirectBgPathEntry;
-            if (directBgPath.HasPendingOverride)
+            if (directBgPath.HasPendingOverride || directBgPath.ShouldObserveAfterClear)
             {
                 var originalPath = CStringPointerToString(path);
                 var hookName = $"ResourceManager.GetResourceAsync type={ReadResourceType(resourceType)} flags=0x{flags:X}";
-                if (directBgPath.TryGetResourceOverridePath(originalPath, hookName, out var overridePathPtr))
+                if (directBgPath.HasPendingOverride && directBgPath.TryGetResourceOverridePath(originalPath, hookName, out var overridePathPtr))
                 {
                     return ResourceManagerGetResourceAsyncHook!.Original(self, category, resourceType, resourceHash, (byte*)overridePathPtr, listener, unkBool, unk, flags);
+                }
+                if (directBgPath.ShouldObserveAfterClear)
+                {
+                    directBgPath.ObserveResourceAfterClear(originalPath, hookName);
                 }
             }
         }
