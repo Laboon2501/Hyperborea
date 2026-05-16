@@ -11,5 +11,10 @@ public static class S
 {
     public static ThreadPool ThreadPool { get; private set; } = null!;
     public static OpcodeUpdater OpcodeUpdater { get; private set; } = null!;
-    public static TerritoryDiscoveryService TerritoryDiscovery { get; private set; } = null!;
+    static TerritoryDiscoveryService? territoryDiscovery;
+    public static TerritoryDiscoveryService TerritoryDiscovery
+    {
+        get => territoryDiscovery ??= new();
+        private set => territoryDiscovery = value;
+    }
 }
