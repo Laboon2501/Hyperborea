@@ -2,10 +2,13 @@
 using Dalamud.Memory;
 using ECommons.ExcelServices;
 using ECommons.EzHookManager;
+using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Application.Network;
 using FFXIVClientStructs.FFXIV.Client.Graphics.Environment;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine;
 using FFXIVClientStructs.FFXIV.Client.Network;
+using Hyperborea.Services;
+using InteropGenerator.Runtime;
 using Lumina.Excel.Sheets;
 using System.CodeDom;
 using System.Net.NetworkInformation;
@@ -18,6 +21,8 @@ public unsafe class Memory
     internal delegate nint LoadZone(nint a1, uint a2, int a3, byte a4, byte a5, byte a6);
     [EzHook("40 55 56 41 54 41 56 41 57 48 81 EC ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24", false)]
     internal EzHook<LoadZone> LoadZoneHook;
+
+    internal EzHook<LayoutWorld.Delegates.LoadPrefetchLayout>? LoadPrefetchLayoutHook;
 
     internal EzHook<PacketDispatcher.Delegates.OnReceivePacket> PacketDispatcher_OnReceivePacketHook;
     internal EzHook<PacketDispatcher.Delegates.OnReceivePacket> PacketDispatcher_OnReceivePacketMonitorHook;
@@ -64,6 +69,15 @@ public unsafe class Memory
         PluginLog.Information($"ZoneUp opcode: {HeartbeatOpcode}");
         EzSignatureHelper.Initialize(this);
         ActiveScene = (byte*)(((nint)EnvManager.Instance()) + 36);
+        try
+        {
+            LoadPrefetchLayoutHook = new((nint)LayoutWorld.Addresses.LoadPrefetchLayout.Value, LoadPrefetchLayoutDetour, true);
+            PluginLog.Information("[DirectBgPath] LoadPrefetchLayout hook initialized.");
+        }
+        catch (Exception e)
+        {
+            PluginLog.Warning($"[DirectBgPath] Failed to initialize LoadPrefetchLayout hook. {e.GetType().Name}: {e.Message}");
+        }
     }
 
     internal nint IsFlightProhibitedDetour()
@@ -251,5 +265,35 @@ public unsafe class Memory
             e.Log();
         }
         return LoadZoneHook.Original(a1, a2, a3, a4, a5, a6);
+    }
+
+    internal void LoadPrefetchLayoutDetour(LayoutWorld* self, int a2, CStringPointer path, byte a4, uint a5, uint a6, GameMain.Festival* festivals, uint a8)
+    {
+        try
+        {
+            var originalPath = CStringPointerToString(path);
+            if (global::Hyperborea.Services.S.DirectBgPathEntry.TryGetOverridePath(originalPath, out var overridePathPtr))
+            {
+                LoadPrefetchLayoutHook!.Original(self, a2, (byte*)overridePathPtr, a4, a5, a6, festivals, a8);
+                return;
+            }
+        }
+        catch (Exception e)
+        {
+            PluginLog.Warning($"[DirectBgPath] LoadPrefetchLayout detour failed. {e.GetType().Name}: {e.Message}");
+        }
+        LoadPrefetchLayoutHook!.Original(self, a2, path, a4, a5, a6, festivals, a8);
+    }
+
+    static string CStringPointerToString(CStringPointer path)
+    {
+        try
+        {
+            return MemoryHelper.ReadStringNullTerminated((nint)(byte*)path);
+        }
+        catch
+        {
+            return "";
+        }
     }
 }

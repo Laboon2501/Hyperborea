@@ -11,6 +11,7 @@ using FFXIVClientStructs.FFXIV.Client.Game.Event;
 using FFXIVClientStructs.FFXIV.Client.Graphics.Environment;
 using FFXIVClientStructs.FFXIV.Client.LayoutEngine;
 using Hyperborea.Gui;
+using Hyperborea.Services;
 using Lumina.Excel.Sheets;
 using System.Globalization;
 using System.IO;
@@ -305,6 +306,7 @@ public unsafe static class Utils
 
     public static void Revert()
     {
+        S.DirectBgPathEntry.Clear("revert");
         if (Svc.Condition[ConditionFlag.Mounted]) Player.Character->Mount.CreateAndSetupMount(0, 0, 0, 0, 0, 0, 0);
         if (UI.SavedPos != null)
         {

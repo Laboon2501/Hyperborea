@@ -3,6 +3,8 @@ using ECommons.ExcelServices;
 using Lumina.Excel;
 using Lumina.Excel.Sheets;
 using System.Collections;
+using System.Diagnostics;
+using System.Threading;
 
 namespace Hyperborea.Services;
 
@@ -43,25 +45,40 @@ public sealed class TerritoryDiscoveryService
     readonly HashSet<string> loggedWarnings = [];
     readonly object cacheLock = new();
 
-    List<TerritoryBrowserEntry> cachedEntries = [];
-    Dictionary<uint, TerritoryBrowserEntry> cachedTerritoryEntries = [];
-    Dictionary<string, TerritoryBrowserEntry> cachedKeyEntries = [];
-    bool? cachedIncludeCutscene;
+    TerritoryDiscoverySnapshot? currentSnapshot;
+    CancellationTokenSource? buildCts;
+    Task? buildTask;
+    bool building;
+    bool? buildingIncludeCutscene;
+    bool? requestedIncludeCutscene;
+    int buildGeneration;
 
-    public TerritoryDiscoveryStats Stats { get; private set; } = new();
+    public TerritoryDiscoveryStats Stats => GetSnapshot()?.Stats ?? new();
     public string Status { get; private set; } = "Not built";
     public bool UsedFallbackNames { get; private set; }
+    public bool IsBuilding
+    {
+        get
+        {
+            lock (cacheLock) return building;
+        }
+    }
+    public float Progress { get; private set; }
+    public string CurrentStage { get; private set; } = "Idle";
+    public string LastError { get; private set; } = "";
+    public DateTime? LastBuildStartedAt { get; private set; }
 
     public IReadOnlyList<TerritoryBrowserEntry> GetEntries(bool includeCutsceneTerritories)
     {
+        RequestBuild(includeCutsceneTerritories, false);
+        return GetSnapshot()?.Entries ?? [];
+    }
+
+    public TerritoryDiscoverySnapshot? GetSnapshot()
+    {
         lock (cacheLock)
         {
-            if (cachedIncludeCutscene != includeCutsceneTerritories || cachedEntries.Count == 0)
-            {
-                Rebuild(includeCutsceneTerritories);
-            }
-
-            return cachedEntries;
+            return currentSnapshot;
         }
     }
 
@@ -70,79 +87,178 @@ public sealed class TerritoryDiscoveryService
         if (territoryId == 0) return null;
         lock (cacheLock)
         {
-            if (cachedEntries.Count == 0)
-            {
-                Rebuild(false);
-            }
-
-            if (cachedTerritoryEntries.TryGetValue(territoryId, out var entry)) return entry;
-            return TryGetTerritoryRow(territoryId, out var territory)
-                ? CreateTerritoryEntry(territory)
-                : CreateFallbackTerritoryEntry(territoryId);
+            if (currentSnapshot?.ByTerritoryId.TryGetValue(territoryId, out var entry) == true) return entry;
         }
+
+        return TryGetTerritoryRow(territoryId, out var territory)
+            ? CreateTerritoryEntry(territory)
+            : CreateFallbackTerritoryEntry(territoryId);
     }
 
     public TerritoryBrowserEntry? GetEntryByKey(string key)
     {
         lock (cacheLock)
         {
-            return cachedKeyEntries.TryGetValue(key, out var entry) ? entry : null;
+            return currentSnapshot?.ByKey.TryGetValue(key, out var entry) == true ? entry : null;
         }
     }
 
     public void Invalidate()
+        => RequestBuild(requestedIncludeCutscene ?? currentSnapshot?.IncludeCutsceneTerritories ?? false, true);
+
+    public void RequestBuild(bool includeCutsceneTerritories, bool forceRefresh)
     {
         lock (cacheLock)
         {
-            cachedIncludeCutscene = null;
-            cachedEntries = [];
-            cachedTerritoryEntries = [];
-            cachedKeyEntries = [];
-            S.BgPathResolver.Invalidate();
-            Status = "Cache invalidated";
+            requestedIncludeCutscene = includeCutsceneTerritories;
+            if (!forceRefresh
+                && currentSnapshot?.IncludeCutsceneTerritories == includeCutsceneTerritories
+                && currentSnapshot.Entries.Count > 0)
+            {
+                return;
+            }
+
+            if (building)
+            {
+                if (!forceRefresh && buildingIncludeCutscene == includeCutsceneTerritories) return;
+                buildCts?.Cancel();
+            }
+
+            if (forceRefresh) S.BgPathResolver.Invalidate();
+            buildCts = new CancellationTokenSource();
+            var token = buildCts.Token;
+            var generation = ++buildGeneration;
+            building = true;
+            buildingIncludeCutscene = includeCutsceneTerritories;
+            Progress = 0f;
+            LastError = "";
+            CurrentStage = "Queued";
+            Status = currentSnapshot == null ? "Building territory cache..." : "Refreshing territory cache...";
+            LastBuildStartedAt = DateTime.Now;
+            buildTask = Task.Run(() => BuildSnapshotAsync(includeCutsceneTerritories, generation, token), token);
         }
     }
 
-    public void Rebuild(bool includeCutsceneTerritories)
+    public void CancelBuild()
+    {
+        lock (cacheLock)
+        {
+            buildCts?.Cancel();
+            CurrentStage = "Cancelling";
+            Status = "Cancelling territory cache build";
+        }
+    }
+
+    void BuildSnapshotAsync(bool includeCutsceneTerritories, int generation, CancellationToken token)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        try
+        {
+            var snapshot = Rebuild(includeCutsceneTerritories, token);
+            stopwatch.Stop();
+            snapshot.BuildDuration = stopwatch.Elapsed;
+            lock (cacheLock)
+            {
+                if (generation != buildGeneration) return;
+                currentSnapshot = snapshot;
+                building = false;
+                buildingIncludeCutscene = null;
+                Progress = 1f;
+                CurrentStage = "Ready";
+                Status = $"Built {snapshot.Entries.Count} entries in {snapshot.BuildDuration.TotalSeconds:F1}s";
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            lock (cacheLock)
+            {
+                if (generation != buildGeneration) return;
+                building = false;
+                buildingIncludeCutscene = null;
+                Progress = currentSnapshot == null ? 0f : 1f;
+                CurrentStage = "Cancelled";
+                Status = currentSnapshot == null ? "Territory cache build cancelled" : "Territory cache refresh cancelled; using previous cache";
+            }
+        }
+        catch (Exception e)
+        {
+            LogWarningOnce("BuildSnapshot", e, "Territory cache build failed.");
+            lock (cacheLock)
+            {
+                if (generation != buildGeneration) return;
+                building = false;
+                buildingIncludeCutscene = null;
+                LastError = $"{e.GetType().Name}: {e.Message}";
+                CurrentStage = "Failed";
+                Status = currentSnapshot == null ? "Territory cache build failed" : "Territory cache refresh failed; using previous cache";
+            }
+        }
+    }
+
+    TerritoryDiscoverySnapshot Rebuild(bool includeCutsceneTerritories, CancellationToken token)
     {
         UsedFallbackNames = false;
-        Status = "Building territory cache...";
         var stats = new TerritoryDiscoveryStats();
         var entries = new Dictionary<string, TerritoryBrowserEntry>();
         var territoryEntries = new Dictionary<uint, TerritoryBrowserEntry>();
         var sceneEntries = new Dictionary<string, TerritoryBrowserEntry>();
 
+        SetBuildProgress("TerritoryType normal", 0.05f);
         LoadNormalTerritories(entries, territoryEntries, stats);
+        token.ThrowIfCancellationRequested();
         if (includeCutsceneTerritories)
         {
+            SetBuildProgress("TerritoryType extended", 0.12f);
             LoadExtraTerritoriesFromTerritoryType(entries, territoryEntries, stats);
+            SetBuildProgress("Map scan", 0.18f);
             LoadMapTerritories(entries, territoryEntries, stats);
+            SetBuildProgress("Quest and cutscene scan", 0.28f);
             LoadCutsceneTerritoriesFromQuestData(entries, territoryEntries, sceneEntries, stats);
+            SetBuildProgress("Instance scan", 0.45f);
             LoadInstanceContentTerritories(entries, territoryEntries, sceneEntries, stats);
             LoadPublicContentTerritories(entries, territoryEntries, sceneEntries, stats);
             LoadWarpTerritories(entries, territoryEntries, sceneEntries, stats);
+            SetBuildProgress("World reference scan", 0.58f);
             LoadAetheryteTerritories(entries, territoryEntries, stats);
             LoadGatheringPointTerritories(entries, territoryEntries, stats);
             LoadQuestEventAreaTerritories(entries, territoryEntries, stats);
+            SetBuildProgress("Reflective event scan", 0.70f);
             LoadReflectiveEventTerritories(entries, territoryEntries, sceneEntries, stats);
+            SetBuildProgress("Scene-only cutscene scan", 0.86f);
             LoadCutsceneSceneOnly(entries, territoryEntries, sceneEntries, stats);
+            token.ThrowIfCancellationRequested();
         }
 
+        SetBuildProgress("Search index", 0.92f);
         foreach (var entry in entries.Values)
         {
             FinalizeEntry(entry);
         }
 
-        cachedEntries = entries.Values
+        var cachedEntries = entries.Values
             .OrderBy(x => x.HasTerritory ? 0 : 1)
             .ThenBy(x => x.TerritoryId ?? uint.MaxValue)
             .ThenBy(x => x.DisplayName)
             .ToList();
-        cachedTerritoryEntries = territoryEntries;
-        cachedKeyEntries = cachedEntries.ToDictionary(x => x.Key, x => x);
-        cachedIncludeCutscene = includeCutsceneTerritories;
-        Stats = stats.WithEntryCounts(cachedEntries);
-        Status = $"Built {cachedEntries.Count} entries";
+        return new TerritoryDiscoverySnapshot
+        {
+            BuiltAt = DateTime.Now,
+            IncludeCutsceneTerritories = includeCutsceneTerritories,
+            Entries = cachedEntries,
+            ByTerritoryId = territoryEntries,
+            ByKey = cachedEntries.ToDictionary(x => x.Key, x => x),
+            Stats = stats.WithEntryCounts(cachedEntries),
+            UsedFallbackNames = UsedFallbackNames,
+        };
+    }
+
+    void SetBuildProgress(string stage, float progress)
+    {
+        lock (cacheLock)
+        {
+            CurrentStage = stage;
+            Progress = progress;
+        }
     }
 
     void LoadNormalTerritories(Dictionary<string, TerritoryBrowserEntry> entries, Dictionary<uint, TerritoryBrowserEntry> territoryEntries, TerritoryDiscoveryStats stats)
@@ -446,6 +562,7 @@ public sealed class TerritoryDiscoveryService
                 resolvedEntry.AddTag("[BgResolved]");
                 resolvedEntry.AddTag("[CutsceneResolved]");
                 resolvedEntry.AddTag("[Cutscene]");
+                resolvedEntry.Mode = TerritoryEntryMode.BgResolvedTerritory;
                 resolvedEntry.Bg = resolvedEntry.Bg.NullWhenEmpty() ?? match.TerritoryBgPath;
                 resolvedEntry.SearchParts.Add(path);
                 resolvedEntry.SearchParts.Add(BgPathResolver.NormalizePath(path));
@@ -467,7 +584,8 @@ public sealed class TerritoryDiscoveryService
                 TerritoryId = null,
                 DisplayName = path.NullWhenEmpty() ?? $"Cutscene {cutsceneId}",
                 Bg = path,
-                Tags = ["[Cutscene]", "[SceneOnly]", "[NoTerritory]", "[Unsafe]"],
+                Tags = ["[Cutscene]", "[SceneOnly]", "[NoTerritory]", "[DirectBgPath]", "[Unsafe]"],
+                Mode = TerritoryEntryMode.DirectBgPath,
                 RequiresConfirmation = true,
                 IsPotentiallyUnsafe = true,
             };
@@ -1031,6 +1149,25 @@ public enum TerritoryBrowserFilter
     Unsafe,
 }
 
+public sealed class TerritoryDiscoverySnapshot
+{
+    public DateTime BuiltAt;
+    public bool IncludeCutsceneTerritories;
+    public TimeSpan BuildDuration;
+    public IReadOnlyList<TerritoryBrowserEntry> Entries = [];
+    public IReadOnlyDictionary<uint, TerritoryBrowserEntry> ByTerritoryId = new Dictionary<uint, TerritoryBrowserEntry>();
+    public IReadOnlyDictionary<string, TerritoryBrowserEntry> ByKey = new Dictionary<string, TerritoryBrowserEntry>();
+    public TerritoryDiscoveryStats Stats = new();
+    public bool UsedFallbackNames;
+}
+
+public enum TerritoryEntryMode
+{
+    TerritoryType,
+    BgResolvedTerritory,
+    DirectBgPath,
+}
+
 public sealed class TerritoryBrowserEntry
 {
     public string Key = "";
@@ -1048,6 +1185,7 @@ public sealed class TerritoryBrowserEntry
     public List<string> SearchParts = [];
     public List<TerritorySourceInfo> Sources = [];
     public List<BgPathMatch> BgPathMatches = [];
+    public TerritoryEntryMode Mode = TerritoryEntryMode.TerritoryType;
     public bool WasVisibleInOldSelector;
     public bool IsPotentiallyUnsafe;
     public bool RequiresConfirmation;
@@ -1090,7 +1228,8 @@ public sealed class TerritoryBrowserEntry
                 .Concat(Sources.SelectMany(x => x.SearchParts))
                 .Concat(BgPathMatches.SelectMany(x => x.SearchParts))
                 .Where(x => !x.IsNullOrEmpty())
-                .Distinct());
+                .Distinct())
+            .ToLowerInvariant();
     }
 
     public bool HasTag(string tag) => Tags.Any(x => x.Equals(tag, StringComparison.OrdinalIgnoreCase));

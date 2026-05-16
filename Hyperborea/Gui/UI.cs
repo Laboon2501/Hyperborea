@@ -31,6 +31,13 @@ public unsafe static class UI
     static string TerritorySearch = "";
     static string SelectedTerritoryBrowserKey = "";
     static TerritoryBrowserFilter TerritoryFilter = TerritoryBrowserFilter.All;
+    static string LastSeenTerritorySearch = "";
+    static DateTime TerritorySearchChangedAt = DateTime.MinValue;
+    static string AppliedTerritorySearch = "";
+    static TerritoryBrowserFilter AppliedTerritoryFilter = TerritoryBrowserFilter.All;
+    static DateTime AppliedSnapshotBuiltAt = DateTime.MinValue;
+    static TerritoryBrowserEntry[] CachedVisibleTerritoryEntries = [];
+    const string DirectBgPathPopup = "Direct BgPath 风险确认##HyperboreaDirectBgPath";
     const string TerritoryBrowserPopup = "浏览区域##HyperboreaTerritoryBrowser";
     const string UnsafeTerritoryPopup = "确认加载风险区域##HyperboreaUnsafeTerritory";
 
@@ -155,6 +162,7 @@ public unsafe static class UI
                 ImGui.SetCursorPosX(ImGuiEx.GetWindowContentRegionWidth() - ImGuiHelpers.GetButtonSize("浏览").X - ImGuiHelpers.GetButtonSize("区域编辑器").X - 50f);
                 if (ImGuiComponents.IconButtonWithText((FontAwesomeIcon)0xf002, "浏览"))
                 {
+                    S.TerritoryDiscovery.RequestBuild(C.IncludeCutsceneEventTerritories, false);
                     ImGui.OpenPopup(TerritoryBrowserPopup);
                 }
                 ImGui.SameLine();
@@ -291,12 +299,15 @@ public unsafe static class UI
         }
         DrawTerritoryBrowserPopup();
         DrawUnsafeTerritoryPopup();
+        DrawDirectBgPathPopup();
     }
 
     static void DrawTerritoryBrowserPopup()
     {
         if (!ImGui.BeginPopup(TerritoryBrowserPopup)) return;
 
+        S.TerritoryDiscovery.RequestBuild(C.IncludeCutsceneEventTerritories, false);
+        var snapshot = S.TerritoryDiscovery.GetSnapshot();
         ImGui.SetNextItemWidth(360f);
         ImGui.InputTextWithHint("##territorySearch", "搜索 Territory / Map / Quest / Cutscene / Event / tag", ref TerritorySearch, 160);
         ImGui.SameLine();
@@ -313,7 +324,18 @@ public unsafe static class UI
 
         var entries = S.TerritoryDiscovery.GetEntries(C.IncludeCutsceneEventTerritories);
         var stats = S.TerritoryDiscovery.Stats;
+        if (S.TerritoryDiscovery.IsBuilding)
+        {
+            ImGuiEx.Text($"后台构建: {S.TerritoryDiscovery.CurrentStage} {S.TerritoryDiscovery.Progress:P0}");
+            ImGui.SameLine();
+            if (ImGui.Button("取消构建")) S.TerritoryDiscovery.CancelBuild();
+        }
+        if (!S.TerritoryDiscovery.LastError.IsNullOrEmpty())
+        {
+            ImGuiEx.TextWrapped(EColor.RedBright, $"区域缓存构建失败: {S.TerritoryDiscovery.LastError}");
+        }
         ImGuiEx.Text($"状态: {S.TerritoryDiscovery.Status}  总数: {stats.TotalEntries}  普通: {stats.NormalEntries}  Quest: {stats.QuestEntries}  Cutscene: {stats.CutsceneEntries}  Event: {stats.EventSceneEntries}  Instance: {stats.InstanceEntries}  Unsafe: {stats.UnsafeEntries}");
+        DrawDirectBgPathStatus();
         if (S.TerritoryDiscovery.UsedFallbackNames)
         {
             ImGuiEx.TextWrapped(EColor.YellowBright, "部分区域名称读取失败，已使用 Territory ID 代替。");
@@ -332,7 +354,7 @@ public unsafe static class UI
             ImGui.EndCombo();
         }
 
-        var visibleEntries = entries.Where(MatchesTerritoryFilter).Where(MatchesTerritorySearch).ToArray();
+        var visibleEntries = snapshot == null ? GetVisibleTerritoryEntries(entries) : GetVisibleTerritoryEntries(snapshot);
         ImGui.SameLine();
         ImGuiEx.Text($"显示: {visibleEntries.Length}");
 
@@ -367,7 +389,7 @@ public unsafe static class UI
                         ImGui.EndDisabled();
                         if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
                         {
-                            ImGuiEx.Tooltip("该条目缺少 TerritoryType，不能直接进入。");
+                            ImGuiEx.Tooltip("该条目缺少 TerritoryType，请在详情中使用 Direct BgPath 模式尝试进入。");
                         }
                     }
 
@@ -381,7 +403,12 @@ public unsafe static class UI
                     ImGui.TableNextColumn();
                     ImGuiEx.Text($"{entry.SourceCount}");
                     ImGui.TableNextColumn();
-                    ImGuiEx.Text(entry.Tags.Print(" "));
+                    var tags = entry.Tags.Print(" ");
+                    if (!entry.HasTerritory && !entry.Bg.IsNullOrEmpty() && C.DirectBgPathCarrierTerritoryId != 0)
+                    {
+                        tags += " [DirectBgPathAvailable]";
+                    }
+                    ImGuiEx.Text(tags);
                     ImGui.TableNextColumn();
                     ImGuiEx.Text(entry.MapId == 0 ? entry.MapText : $"{entry.MapId}");
                     ImGui.TableNextColumn();
@@ -469,10 +496,45 @@ public unsafe static class UI
         return entry?.RequiresConfirmation == true;
     }
 
+    static TerritoryBrowserEntry[] GetVisibleTerritoryEntries(TerritoryDiscoverySnapshot snapshot)
+        => GetVisibleTerritoryEntries(snapshot.Entries, snapshot.BuiltAt);
+
+    static TerritoryBrowserEntry[] GetVisibleTerritoryEntries(IReadOnlyList<TerritoryBrowserEntry> entries)
+        => GetVisibleTerritoryEntries(entries, DateTime.MinValue);
+
+    static TerritoryBrowserEntry[] GetVisibleTerritoryEntries(IReadOnlyList<TerritoryBrowserEntry> entries, DateTime snapshotBuiltAt)
+    {
+        if (!LastSeenTerritorySearch.Equals(TerritorySearch, StringComparison.Ordinal))
+        {
+            LastSeenTerritorySearch = TerritorySearch;
+            TerritorySearchChangedAt = DateTime.UtcNow;
+        }
+
+        var queryChanged = !AppliedTerritorySearch.Equals(TerritorySearch, StringComparison.Ordinal);
+        var debounceReady = !queryChanged || (DateTime.UtcNow - TerritorySearchChangedAt).TotalMilliseconds >= 250;
+        var mustRefresh = snapshotBuiltAt != AppliedSnapshotBuiltAt
+            || AppliedTerritoryFilter != TerritoryFilter
+            || CachedVisibleTerritoryEntries.Length == 0
+            || (queryChanged && debounceReady);
+
+        if (!mustRefresh) return CachedVisibleTerritoryEntries;
+
+        AppliedTerritorySearch = TerritorySearch;
+        AppliedTerritoryFilter = TerritoryFilter;
+        AppliedSnapshotBuiltAt = snapshotBuiltAt;
+        var query = TerritorySearch.Trim().ToLowerInvariant();
+        CachedVisibleTerritoryEntries = entries
+            .Where(MatchesTerritoryFilter)
+            .Where(entry => query.IsNullOrEmpty() || entry.SearchText.Contains(query, StringComparison.Ordinal))
+            .Take(5000)
+            .ToArray();
+        return CachedVisibleTerritoryEntries;
+    }
+
     static bool MatchesTerritorySearch(TerritoryBrowserEntry entry)
     {
         if (TerritorySearch.IsNullOrEmpty()) return true;
-        return entry.SearchText.Contains(TerritorySearch, StringComparison.OrdinalIgnoreCase);
+        return entry.SearchText.Contains(TerritorySearch.Trim().ToLowerInvariant(), StringComparison.Ordinal);
     }
 
     static bool MatchesTerritoryFilter(TerritoryBrowserEntry entry)
@@ -512,6 +574,7 @@ public unsafe static class UI
         if (!entry.HasTerritory && !entry.Bg.IsNullOrEmpty())
         {
             ImGuiEx.TextWrapped(EColor.RedBright, "No TerritoryType matched this Bg/Path. Direct BgPath Entry Mode / territory data injection is required.");
+            DrawDirectBgPathControls(entry);
         }
 
         if (entry.BgPathMatches.Count > 0)
@@ -542,6 +605,112 @@ public unsafe static class UI
             ImGuiEx.Text($"... {entry.Sources.Count - shownSources.Length} more sources");
         }
         ImGui.EndChild();
+    }
+
+    static void DrawDirectBgPathStatus()
+    {
+        var service = S.DirectBgPathEntry;
+        service.Update();
+        ImGuiEx.Text($"Direct BgPath: {service.State}  Carrier: {(C.DirectBgPathCarrierTerritoryId == 0 ? "未配置" : C.DirectBgPathCarrierTerritoryId.ToString())}  Hook: {(service.IsHookReady ? "OK" : "不可用")}");
+        if (!service.TargetPath.IsNullOrEmpty())
+        {
+            ImGuiEx.TextWrapped($"Target: {service.TargetPath}  Hits: {service.OverrideHits}");
+        }
+        if (!service.LastError.IsNullOrEmpty())
+        {
+            ImGuiEx.TextWrapped(EColor.RedBright, $"Direct BgPath error: {service.LastError}");
+        }
+        if (service.State is DirectBgPathState.Preparing or DirectBgPathState.Active)
+        {
+            if (ImGui.Button("清除 DirectBgPath Override"))
+            {
+                service.Clear("user cleared override");
+            }
+        }
+    }
+
+    static void DrawDirectBgPathControls(TerritoryBrowserEntry entry)
+    {
+        var carrier = (int)C.DirectBgPathCarrierTerritoryId;
+        ImGui.SetNextItemWidth(120f);
+        if (ImGui.InputInt("Direct BgPath Carrier Territory", ref carrier))
+        {
+            S.DirectBgPathEntry.SetCarrier((uint)Math.Max(carrier, 0));
+        }
+        ImGui.SameLine();
+        if (ImGui.Button("使用当前区域作为载体"))
+        {
+            S.DirectBgPathEntry.SetCarrier(Svc.ClientState.TerritoryType);
+        }
+        ImGui.SameLine();
+        if (entry.HasTerritory && ImGui.Button("使用该区域作为载体"))
+        {
+            S.DirectBgPathEntry.SetCarrier(entry.RowId);
+        }
+
+        if (C.DirectBgPathCarrierTerritoryId == 0)
+        {
+            ImGuiEx.TextWrapped(EColor.YellowBright, "该条目缺少 TerritoryType。可作为线索搜索；若要尝试进入，请先配置 Direct BgPath Carrier。");
+        }
+        else
+        {
+            ImGuiEx.TextWrapped(EColor.YellowBright, "该条目缺少 TerritoryType，将使用 Direct BgPath 模式通过载体区域尝试加载。");
+        }
+
+        if (ImGui.Button("复制 BgPath"))
+        {
+            ImGui.SetClipboardText(entry.Bg);
+        }
+        ImGui.SameLine();
+        var disabled = C.DirectBgPathCarrierTerritoryId == 0 || !S.DirectBgPathEntry.IsHookReady || !Utils.CanUse();
+        if (disabled) ImGui.BeginDisabled();
+        if (ImGui.Button("使用 Direct BgPath 尝试进入"))
+        {
+            SelectedTerritoryBrowserKey = entry.Key;
+            ImGui.OpenPopup(DirectBgPathPopup);
+        }
+        if (disabled) ImGui.EndDisabled();
+        if (disabled && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+        {
+            ImGuiEx.Tooltip("需要启用 Hyperborea、配置 carrier，并成功初始化 LoadPrefetchLayout hook。");
+        }
+    }
+
+    static void DrawDirectBgPathPopup()
+    {
+        if (!ImGui.BeginPopup(DirectBgPathPopup)) return;
+        var entry = S.TerritoryDiscovery.GetEntryByKey(SelectedTerritoryBrowserKey);
+        ImGuiEx.TextWrapped(EColor.RedBright, "该场景没有 TerritoryType，将使用 Direct BgPath 模式通过载体区域加载，可能黑屏、崩溃、卡死或无法移动。若失败，请清除 DirectBgPath Override 或返回普通区域。");
+        if (entry != null)
+        {
+            ImGuiEx.TextWrapped($"Target: {entry.Bg}");
+            ImGuiEx.Text($"Carrier Territory: {C.DirectBgPathCarrierTerritoryId}");
+        }
+
+        if (ImGui.Button("确认 Direct BgPath 进入") && entry != null)
+        {
+            LoadDirectBgPath(entry);
+            ImGui.CloseCurrentPopup();
+        }
+        ImGui.SameLine();
+        if (ImGui.Button("取消"))
+        {
+            ImGui.CloseCurrentPopup();
+        }
+        ImGui.EndPopup();
+    }
+
+    static void LoadDirectBgPath(TerritoryBrowserEntry entry)
+    {
+        if (entry.Bg.IsNullOrEmpty() || !Player.Available) return;
+        var l = LayoutWorld.Instance()->ActiveLayout;
+        if (l == null) return;
+        SavedZoneState ??= new SavedZoneState(l->TerritoryTypeId, Player.Object.Position);
+        var loaded = S.DirectBgPathEntry.TryEnter(entry, !SpawnOverride, true, a3, a4, a5, a6, CFCOverride);
+        if (loaded && SpawnOverride)
+        {
+            Player.GameObject->SetPosition(Position.X, Position.Y, Position.Z);
+        }
     }
 
     internal static void CoordBlock(string t, ref float p)

@@ -208,6 +208,7 @@ public unsafe class Hyperborea : IDalamudPlugin
 
     private void OnLogout()
     {
+        S.DirectBgPathEntry.Clear("logout");
         if(P.Enabled)
         {
             PluginLog.Warning($"Disconnect detected, opcode redownload scheduled.");
@@ -262,6 +263,7 @@ public unsafe class Hyperborea : IDalamudPlugin
 
     public void Dispose()
     {
+        S.DirectBgPathEntry.Clear("plugin dispose");
         if(Svc.ClientState.IsLoggedIn && Enabled)
         {
             Utils.Revert();

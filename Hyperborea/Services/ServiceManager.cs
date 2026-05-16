@@ -23,4 +23,10 @@ public static class S
         get => bgPathResolver ??= new();
         private set => bgPathResolver = value;
     }
+    static DirectBgPathEntryService? directBgPathEntry;
+    public static DirectBgPathEntryService DirectBgPathEntry
+    {
+        get => directBgPathEntry ??= new();
+        private set => directBgPathEntry = value;
+    }
 }
